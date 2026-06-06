@@ -31,14 +31,18 @@ The user will obtain this. Exam preparation is handled separately.
 
 ---
 
-## Alternative Band: S-band Amateur Allocation (~3.4 GHz)
+## Alternative Band: S-band Amateur Allocation (~3.4 GHz) *(no longer pursued)*
+
+> The band is now settled on X-band 10.0–10.5 GHz. S-band was attractive only
+> because it fell in the ZCU208 direct-sampling range — that platform and the
+> direct-RF-sampling approach are abandoned, so this section is historical.
 
 ### Allocation
 - ITU amateur: 3.400–3.410 GHz (ITU Region 1) or 3.300–3.500 GHz (varies)
 - Check national allocation — coverage varies significantly by country
 
-### Why Consider This
-- Falls within ZCU208 direct sampling range (2nd Nyquist zone)
+### Why It Was Considered (no longer applies)
+- Fell within ZCU208 direct sampling range (2nd Nyquist zone)
 - No downconversion hardware required
 - Components cheaper and more available than X-band
 - S-band propagation better in rain than X-band
@@ -66,9 +70,15 @@ The user will obtain this. Exam preparation is handled separately.
 
 ---
 
-## Frequency Planning (X-band Option)
-- Centre: 10.25 GHz
-- LO: 8 GHz (fixed)
-- IF centre: 2.25 GHz
-- IF bandwidth: 500 MHz (1.75–2.25 GHz to avoid DC)
-- Image frequency: 10.25 + 2.25 = 12.5 GHz (must be rejected by RF BPF)
+## Frequency Planning (current — dechirp at the antenna)
+- Centre: 10.25 GHz; band 10.0–10.5 GHz
+- **LO = the reference chirp itself** (10.0–10.5 GHz), driving the dechirp mixer
+  per channel — there is no fixed 8 GHz LO and no 2.25 GHz IF.
+- ADC sees the **beat signal at baseband** (DC–~100 MHz, set by the FDMA plan),
+  not an IF.
+- Image rejection is handled by the post-LNA BPF before the mixer plus the
+  digital Hilbert transform; the old 12.5 GHz image-frequency concern does not
+  arise. See `rf-frontend/radar-rx-frontend-edge-digitization.md` §3, §4.3.
+
+> *(Superseded plan: fixed 8 GHz LO → 2.25 GHz IF, image at 12.5 GHz. This
+> belonged to the ZCU208 downconvert-to-IF architecture and is no longer used.)*

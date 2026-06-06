@@ -1,5 +1,16 @@
 # RF Frontend Architecture
 
+> **⚠️ SUPERSEDED — June 2026.** This document describes the original
+> ZCU208-centred RF frontend (the Option A direct-S-band-sampling vs.
+> Option B downconvert-to-IF decision, with the RFSoC as the central
+> digitiser). The project has since settled on **analogue dechirp at the
+> antenna, a commodity ADC per channel digitising the beat signal at the
+> edge, an ECP5 edge FPGA, and fibre transport to a GPU/CPU host** — see
+> [`radar-rx-frontend-edge-digitization.md`](radar-rx-frontend-edge-digitization.md).
+> The band is now fixed at X-band 10.0–10.5 GHz (Option A is dead). Kept as a
+> historical record of the platform decision and its rationale; do not treat
+> the design below as current.
+
 ## System Overview
 - 8 TX channels + 8 RX channels (bistatic phased array)
 - Separate TX and RX antennas — no circulator or T/R switch needed

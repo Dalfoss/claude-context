@@ -1,5 +1,14 @@
 # Software and Toolchain
 
+> **⚠️ SUPERSEDED — June 2026.** This describes the ZCU208 toolchain
+> (PYNQ / Vivado / RF Data Converter). The settled architecture uses a Lattice
+> **ECP5** edge FPGA programmed with the open-source flow (**Yosys + nextpnr +
+> openFPGALoader**, no Vivado, no licence) plus a **GPU/CPU host running CUDA**
+> for range/Doppler/beamforming/CFAR — see
+> [`radar-rx-frontend-edge-digitization.md`](radar-rx-frontend-edge-digitization.md)
+> §4.6 and §7. The GPU-host/cuFFT section below remains broadly relevant; the
+> PYNQ/Vivado sections are historical.
+
 ## PYNQ
 - Pre-built PYNQ images available for ZCU208
 - Supports 25GbE out of the box (pre-compiled bitstream — no license needed)

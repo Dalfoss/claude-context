@@ -1,5 +1,14 @@
 # Radar Theory
 
+> **Partially superseded — June 2026.** The dynamic-range, ENOB, mitigation,
+> and processing-gain fundamentals below still hold. The **platform comparison**
+> (ZCU208 14-bit vs AD9088 12-bit) and the **"14-bit wall at high sample rates"**
+> argument are historical: with analogue dechirp at the antenna the ADC samples
+> a DC–~100 MHz beat signal, so a commodity 14-bit pipeline ADC at 125–250 MSPS
+> (LTC2145-14 → ADC3668) is more than adequate and the high-GSPS monolithic-RFSoC
+> requirement that drove the platform choice no longer exists. See
+> `rf-frontend/radar-rx-frontend-edge-digitization.md` §4.5.
+
 ## ADC Resolution and Dynamic Range
 
 ### Why Resolution Matters for Radar
@@ -25,7 +34,11 @@ vs input frequency — performance degrades at higher input frequencies.
 
 ---
 
-## The 14-bit Wall at High Sample Rates
+## The 14-bit Wall at High Sample Rates *(historical — no longer constrains the design)*
+*This drove the original RFSoC platform decision. It is moot now that the ADC
+samples a low-frequency dechirped beat signal rather than the RF carrier — see
+the banner above.*
+
 **No discrete ADC from any vendor achieves 14-bit resolution at ≥8 GSPS.**
 This is a physics constraint, not a vendor limitation:
 - Thermal noise sets a floor at room temperature
@@ -71,10 +84,16 @@ Radar requires pulse-to-pulse phase coherence for:
 - Phased array beamforming
 
 ### Phase Coherence in This System
-**Option A (direct sampling):** Inherent — all channels share same ADC clock.
-**Option B (X-band mixing):** Requires fixed LO derived from same reference
-as ADC clock. Every pulse sees identical LO phase. Static mixer phase offset
-calibrated once at startup and removed digitally.
+Achieved without RFSoC MTS, by two mechanisms:
+- **Shared OCXO master clock** distributed to every Board A — eliminates
+  inter-board frequency variation, leaving a fixed per-board power-up phase
+  offset.
+- **Startup tone calibration** — the host injects a known tone; each Board A
+  measures its per-channel phase offset and stores fixed correction
+  coefficients in firmware, removed digitally on the host.
+
+The reference chirp also serves as the dechirp-mixer LO, so every pulse sees
+identical LO phase. See `rf-frontend/radar-rx-frontend-edge-digitization.md` §2.4.
 
 ---
 

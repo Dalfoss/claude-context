@@ -8,31 +8,37 @@ those files into context. You do not need to load all files at once.
 ---
 
 ## Project Summary
-8-channel bistatic phased array radar (8 TX + 8 RX antennas).
-Direct RF sampling or single-conversion architecture depending on target band.
-FPGA/SDR platform: ZCU208. Host processing architecture: undecided (GPU/cuFFT
-explored as one candidate — see signal-processing/pipeline.md).
+Bistatic phased array FMCW MIMO radar at X-band 10.0–10.5 GHz, for small-UAV
+detection to ~500 m. Settled architecture: **analogue dechirp at the antenna →
+commodity ADC per channel → Lattice ECP5 edge FPGA (Hilbert + decimation +
+SerDes) → fibre → GPU/CPU host** (CUDA range/Doppler/beamforming/CFAR).
+Self-contained "Board A" (8 RX) tiles 1→32 boards. No ZCU208/RFSoC, no analogue
+channel multiplexing. See `rf-frontend/radar-rx-frontend-edge-digitization.md`.
 Status: Design phase. No hardware purchased yet.
+
+> The earlier ZCU208-centred design (direct-RF / downconvert-to-IF, RFSoC
+> digitiser, S-band vs X-band band decision) is **superseded**. The files
+> marked *(legacy)* below are retained for historical rationale only.
 
 ---
 
 ## File Map
 
-### platform/
+### platform/ — *(legacy: ZCU208 era, superseded)*
 | File | Contents | Load when... |
 |---|---|---|
-| `zcu208.md` | ZCU208 specs, add-on cards, ADC/DAC details, analog input bandwidth, Nyquist zone behaviour, PYNQ | Discussing hardware platform, sampling, ADC limits |
-| `software.md` | PYNQ, Vivado licensing, toolchain, host interface | Discussing software, bring-up, development tools |
-| `vivado-licencing.md` | Vivado license requirements for ZCU208: pre-loaded bitstream, custom bitstream, PYNQ overlay, and production device paths | Discussing Vivado licensing costs and options |
+| `zcu208.md` *(legacy)* | ZCU208 specs, add-on cards, ADC/DAC details, analog input bandwidth, Nyquist zone behaviour, PYNQ | Reviewing the abandoned RFSoC platform decision — **not the current platform** |
+| `software.md` *(legacy)* | PYNQ, Vivado licensing, toolchain, host interface (ECP5 open-source flow + GPU host now replace this; GPU/cuFFT section still relevant) | Reviewing the old ZCU208 toolchain |
+| `vivado-licencing.md` *(legacy)* | Vivado license requirements for ZCU208 — moot under the ECP5 open-source flow | Historical only |
 
 ### rf-frontend/
 | File | Contents | Load when... |
 |---|---|---|
-| `architecture.md` | Block diagram, frequency plan options, LO strategy, direct sampling vs downconversion, phase coherence | Discussing RF chain design |
-| `components.md` | BOM for Phase 1 and Phase 2, part numbers, suppliers, pricing | Discussing parts, procurement, cost |
+| `architecture.md` *(legacy)* | Old ZCU208 frontend: S-band-direct vs X-band-to-IF decision, LO distribution, phase coherence — **superseded by `radar-rx-frontend-edge-digitization.md`** | Reviewing the original frontend decision trail |
+| `components.md` *(legacy)* | Old BOM for ZCU208 Phase 1/Phase 2 — **superseded by the BOM in `radar-rx-frontend-edge-digitization.md` §11** | Reviewing the original cost analysis |
 | `sampling-theory.md` | Nyquist zones, analog input bandwidth, IQ vs real sampling — critical distinctions | Discussing sampling, bandwidth, frequency planning |
 | `fmcw-amplifier.md` | FMCW radar amplifier design at 5.8 GHz and 10.5 GHz — covering critical PA/LNA performance metrics, recommended ICs and PCB modules, and 8TX/8RX channel cost breakdowns for both discrete and modular approaches | Discussing PA/LNA selection at 5.8/10.5 GHz, amplifier ICs vs modules, transmit/receive chain cost |
-| `rf-signal-transport-and-multiplexing.md` | RF transport and channel multiplexing for 8TX × 64RX MIMO FMCW: traditional coax, analog dechirp variants (mixer at rack vs. at antenna), photonic SCM-over-fibre, and OFC channelisation. Includes ENOB/aperture-jitter analysis at 5.8 GHz and a staged cost roadmap from $10k → $355k | Discussing how RX signals reach the ADC, scaling beyond 8 channels, ENOB/aperture jitter, dechirp location, fibre transport, photonic channelisation, system cost staging |
+| `radar-rx-frontend-edge-digitization.md` | **Settled** RF front-end architecture for 10.0–10.5 GHz FMCW MIMO: analogue dechirp + digitise-at-antenna + fibre transport. Self-contained Board A (8 RX patch array, RF chain, 4× LTC2145-14 ADCs in Stage 1 → TI ADC3668 in Stage 2, Lattice ECP5 FPGA mezzanine doing Hilbert/decimation/SerDes), TX board, and GPU/CPU central unit. Documents the decision trail rejecting SCM and WDM, ADC phase coherence, waveform strategy (FDMA/CDM), and the 1→32 board scaling path | Discussing the RX front-end, dechirp-at-antenna, ADC selection/staging, edge FPGA processing, fibre transport, phase coherence, waveform multiplexing, channel scaling |
 
 ### signal-processing/
 | File | Contents | Load when... |
@@ -56,37 +62,45 @@ Status: Design phase. No hardware purchased yet.
 ## Critical Project-Wide Facts
 These apply globally and should always be kept in mind:
 
-1. **ZCU208 ADCs are real ADCs** — IQ output is synthesised digitally via the
-   on-chip DDC after sampling. The hardware constraint is real-ADC Nyquist,
-   not IQ bandwidth. Do not conflate these. See `rf-frontend/sampling-theory.md`.
+1. **Band is settled: X-band 10.0–10.5 GHz** (amateur allocation). The earlier
+   open choice between S-band direct sampling and X-band is closed — there is no
+   S-band path. See `regulatory/spectrum.md`.
 
-2. **Analog input bandwidth ≠ Nyquist frequency** — ZU48DR ADC samples at
-   5 GSPS (Nyquist = 2.5 GHz) but analog input bandwidth extends to 6 GHz.
-   Both limits apply simultaneously. See `rf-frontend/sampling-theory.md`.
+2. **No ZCU208 / no central RFSoC** — Digitisation is distributed to the edge:
+   a commodity ADC per channel on each Board A (LTC2145-14 → ADC3668). Because
+   each ADC only ever sees the dechirped DC–~100 MHz beat signal, the
+   "14-bit-at-5-GSPS only achievable monolithically" argument that drove the
+   RFSoC choice no longer applies. The `platform/*` files are legacy.
+   See `rf-frontend/radar-rx-frontend-edge-digitization.md`.
 
-3. **14-bit resolution is a hard constraint** — No discrete ADC from any vendor
-   achieves 14-bit at ≥8 GSPS. The ZCU208 achieves this only through monolithic
-   integration. This drove the platform decision. See `decisions/log.md`.
+3. **IQ is synthesised digitally in the edge FPGA** — the dechirp mixer is a
+   real (non-IQ) mixer; a ~64-tap Hilbert FIR in the ECP5 generates complex IQ
+   from real ADC samples, with >60 dB image rejection (better than hardware IQ
+   balance). See `rf-frontend/radar-rx-frontend-edge-digitization.md` §4.4.
 
-4. **mmWave support on ZCU208 is external** — "Extended mmWave support" refers
-   to the RFMC 2.0 daughter card connector, not native ADC capability.
-   The ADC ceiling is 6 GHz regardless. See `platform/zcu208.md`.
+4. **Phase coherence: shared OCXO + startup tone calibration**, not RFSoC MTS —
+   one OCXO master clock is distributed to every Board A (fixing frequency,
+   leaving a per-board power-up phase offset), and a startup tone injected by
+   the host lets each board measure and store fixed per-channel phase
+   corrections. See `rf-frontend/radar-rx-frontend-edge-digitization.md` §2.4.
 
-5. **Target frequency band is undecided** — Two viable paths remain open:
-   - Direct sampling at S-band (3.1–3.5 GHz), no mixing required
-   - Single-conversion at X-band (10.0–10.5 GHz amateur band), fixed LO
-   See `rf-frontend/architecture.md` and `regulatory/spectrum.md`.
+5. **Bandwidth reduction lives at the edge; heavy DSP on a GPU/CPU host** — the
+   ECP5 does Hilbert + decimation (the data-rate reduction step) before fibre;
+   range/Doppler/beamforming/CFAR run on the host. No central FPGA: at 32 boards
+   raw data is ~448 Gbps, untenable to centralise before reduction.
+   See `rf-frontend/radar-rx-frontend-edge-digitization.md` §2.3, §7.
 
-6. **Aperture jitter caps direct-RF ENOB at ~7 bits at 5.8 GHz** — The 14-bit
-   ADC delivers only ~45 dB dynamic range when sampling the raw carrier.
-   Moving the dechirp into the analog domain (so the ADC sees the 0–5 MHz
-   beat signal, not the 5.8 GHz carrier) recovers 4–5 ENOB bits and is the
-   single highest-impact design step in the project. Location of the mixer
-   (rack vs. antenna vs. photonic) does not affect the ENOB outcome — only
-   deployment flexibility. See `rf-frontend/rf-signal-transport-and-multiplexing.md`.
+6. **Dechirp happens in the analog domain, at the antenna** — Sampling the
+   raw carrier wastes ENOB to aperture jitter. The settled architecture
+   dechirps each channel with a passive mixer driven by the reference chirp
+   so the ADC only ever sees the low-frequency beat signal, then digitises
+   immediately at the antenna board. This is the single highest-impact design
+   choice. See `rf-frontend/radar-rx-frontend-edge-digitization.md`.
 
-7. **64 RX channels with 8 ADCs requires multiplexing** — Scaling to the
-   full 8TX × 64RX MIMO aperture cannot be done with one coax per channel.
-   Photonic SCM-over-fibre (Stage 2) or OFC channelisation (Stage 3) are
-   the two paths under evaluation. See
-   `rf-frontend/rf-signal-transport-and-multiplexing.md`.
+7. **No analog channel multiplexing — digitise at the antenna instead** —
+   Analog multiplexing schemes (SCM, WDM/RF-over-fibre) were evaluated and
+   rejected: SCM intermodulation floors weak channels and scales as N³, while
+   WDM does not reduce ADC count. The settled approach puts an ADC per channel
+   on each Board A and transports digital samples over fibre, scaling by
+   tiling Board A instances (1→32 boards). See
+   `rf-frontend/radar-rx-frontend-edge-digitization.md`.

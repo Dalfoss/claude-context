@@ -1,5 +1,14 @@
 # FMCW Radar Amplifier Design: Performance Metrics, Component Recommendations, and Cost Summary
 
+> **Partial scope note — June 2026.** The band is now fixed at **X-band
+> 10.0–10.5 GHz**, so the **5.8 GHz half of this document is out of scope**
+> (kept only as comparative reference). The **RX LNA selection here
+> (HMC8410/8412/1049) is superseded** — the settled RX front-end uses the
+> **Qorvo CMD319C3** (0.95 dB NF, chosen explicitly over HMC1049); see
+> `rf-frontend/radar-rx-frontend-edge-digitization.md` §4.3.3. The **PA / TX
+> metrics and 10.5 GHz part survey remain useful** input for the TX board,
+> which is not yet specified (new doc §6).
+
 ## 1. Critical PA Performance Metrics for FMCW Radar
 
 ### Phase Noise (Most Important)

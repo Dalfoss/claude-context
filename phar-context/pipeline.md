@@ -1,78 +1,61 @@
 # Signal Processing Pipeline
 
 ## Overview
-ZCU208 performs ADC sampling and digital down-conversion on-chip.
-Decimated IQ data is then streamed to a host for further processing.
-**Host processing architecture and tools are not yet decided.**
+Processing is split between the **edge FPGA on each Board A** and a **central
+GPU/CPU host**. The edge FPGA does the bandwidth-reduction work (Hilbert IQ
+generation + decimation) immediately after the ADC; decimated complex IQ is
+sent over fibre to the host, which does range/Doppler/beamforming/CFAR. There
+is no central FPGA and no RFSoC. See
+`rf-frontend/radar-rx-frontend-edge-digitization.md` §2.3, §4.6, §7.
 
 ---
 
-## On-Chip Processing (ZCU208 / RFSoC fabric)
-This section is settled — the ZCU208 DDC and MTS are definite parts of the design.
+## Edge Processing (Lattice ECP5 on Board A)
+This is the bandwidth-reduction stage — it must live at the edge because raw
+samples across all boards are untenable to centralise (~448 Gbps at 32 boards).
 
-### DDC — Digital Down Converter
-- Built into ZU48DR RFSoC fabric (hardened IP)
-- Converts real ADC samples to complex IQ via NCO and mixer
-- Applies programmable decimation filter
-- Outputs: complex IQ at reduced sample rate
+### Hilbert IQ generation
+- The dechirp mixer is real; a ~64-tap Hilbert FIR generates complex IQ from
+  the real ADC samples, with >60 dB image rejection.
 
 ### Decimation
-- Target: 8× decimation (or as required for 500 MHz IQ bandwidth)
-- Input: 5 GSPS real samples
-- Output: 500 MSPS complex IQ per channel
-- Processing gain from decimation: ~4.5 dB (~3 dB per octave of oversampling)
+- CIC or half-band FIR, ~4× nominal (the beat bandwidth is far below the ADC
+  Nyquist, so decimation costs little and recovers ENOB).
+- Processing gain: ~3 dB per octave of oversampling.
 
-### Data Rate After Decimation
-- 8 channels × 500 MSPS × 24 bits (IQ at 12-bit — confirm word width) = 96 Gbps
-- ZCU208 SFP28 (4× 25G) = 100 Gbps — sufficient for continuous streaming
-- With PYNQ pre-built image this works without additional IP licensing
-
----
-
-## Multi-Tile Synchronisation (MTS)
-- ZCU208 MTS ensures all 8 ADC channels are phase-aligned to within
-  one sample at startup
-- Essential for coherent beamforming across channels
-- Must be enabled in Vivado RF Data Converter IP configuration
-- PYNQ supports MTS — verify in current PYNQ image release notes
+### Data rate after edge processing
+- 8 ch × 14-bit × 2 (I+Q) × ~31 MSPS ≈ **7 Gbps → 10G SFP+** (at 4× decimation)
+- ~3.5 Gbps at 8× decimation → 5G SFP+
+- One fibre per Board A into a multi-port 10G/25G NIC on the host.
 
 ---
 
-## Host Processing (UNDECIDED)
-
-### What Needs to Happen (regardless of implementation)
-The radar processing pipeline requires operations across three dimensions:
-1. **Fast time (range)** — matched filter / FFT across samples within a pulse
-2. **Slow time (Doppler)** — FFT across pulses
-3. **Spatial (angle/beamforming)** — phase-weighted summation or FFT across channels
-
-### Candidate Approaches (explored, not decided)
-
-**GPU with cuFFT:**
-- cuFFT library handles large batched FFTs efficiently
-- All three dimensions can be processed on GPU
-- Data organised as [channels × pulses × samples] array
-- High memory bandwidth available on modern GPUs
-- Explored as a candidate but not committed to
-
-**FPGA fabric (ZCU208 PL):**
-- Lower latency than GPU
-- Harder to modify once implemented
-- Makes sense if real-time processing is a hard requirement
-- Beamforming in particular is a candidate for FPGA implementation
-
-**CPU / numpy / scipy:**
-- Simplest to implement for initial testing and algorithm development
-- Insufficient throughput for real-time operation at full data rate
-- Valid for offline processing during bring-up and validation
+## Phase Coherence (no MTS)
+Coherence comes from a shared **OCXO master clock** to every Board A plus a
+**startup tone calibration**: the host injects a known tone, each board measures
+its per-channel phase offset, and fixed correction coefficients are stored in
+firmware. See `rf-frontend/radar-rx-frontend-edge-digitization.md` §2.4.
 
 ---
 
-## Pending Design Decisions
-- [ ] Host processing architecture: GPU, FPGA fabric, or hybrid
-- [ ] If GPU: which library/framework (cuFFT, PyTorch, custom CUDA)
-- [ ] IQ word width: 12-bit, 16-bit, or 32-bit float — affects data rate and host memory
-- [ ] Pulse repetition interval and waveform design
-- [ ] Number of pulses per CPI (coherent processing interval)
-- [ ] Whether beamforming runs on FPGA or host
-- [ ] Real-time vs offline processing requirement
+## Host Processing (GPU/CPU workstation — settled)
+The host receives decimated complex IQ over fibre and runs (CUDA):
+
+1. **Per-channel phase calibration** — apply the stored startup-tone coefficients
+2. **TX channel separation** — digital bandpass per FDM slot; slow-time
+   correlation against Hadamard codes for CDM
+3. **Fast time (range)** — range FFT per channel
+4. **Slow time (Doppler)** — Doppler FFT per channel
+5. **Spatial (beamforming)** — digital beamforming across the full virtual aperture
+6. **CFAR** — detection
+
+A central FPGA is only revisited if very low detection latency becomes a hard
+requirement at large scale.
+
+---
+
+## Open / Pending
+- [ ] IQ word width on the fibre link (affects per-board data rate)
+- [ ] PRI and waveform parameters; pulses per CPI
+- [ ] Real-time vs offline host processing requirement
+- [ ] Stage 4 (32-board) host aggregation: multi-NIC vs SmartNIC vs central FPGA

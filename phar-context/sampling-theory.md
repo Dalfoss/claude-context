@@ -1,5 +1,15 @@
 # Sampling Theory — Critical Distinctions
 
+> **Partially superseded — June 2026.** The settled architecture dechirps in
+> the analogue domain at the antenna, so the ADC samples a **DC–~100 MHz beat
+> signal**, not the RF carrier and not an IF. The ZCU208/RFSoC and MxFE DDC
+> material and the Nyquist-zone / direct-sampling discussion below describe the
+> abandoned platform and are kept for reference only. What still applies: the
+> real-vs-IQ principle, oversampling-plus-decimation processing gain, and
+> analog-input-bandwidth-vs-Nyquist as a general ADC concept. See the rewritten
+> "Practical Implications" section at the bottom and
+> `rf-frontend/radar-rx-frontend-edge-digitization.md` §4.4–§4.5.
+
 ## [PERSIST] DDC Architecture Across Platforms
 
 The real-ADC → digital-IQ distinction holds across all platforms considered,
@@ -98,16 +108,23 @@ for any Nyquist zone approach.
 
 ---
 
-## Practical Implications for This Radar Project
+## Practical Implications for This Radar Project (current architecture)
 
-### Direct Sampling (S-band, no mixing)
-- Target band: 3.1–3.5 GHz → sits in **2nd Nyquist zone**
-- Aliases cleanly into 1st zone
-- Requires S-band bandpass filter before ADC
-- ZCU208 DDC then digitally down-converts to baseband IQ
+The ADC never sees the 10 GHz carrier or any IF — the analogue dechirp mixer
+puts a **DC–~100 MHz beat signal** at the ADC input. Sampling is therefore
+baseband, not Nyquist-zone-folded.
 
-### Downconversion (X-band with fixed LO)
-- RF at 10.0–10.5 GHz, downconverted to IF at ~2.25 GHz
-- IF sits in **1st Nyquist zone** — clean, no aliasing needed
-- Simpler from a sampling perspective; complexity moves to RF frontend
-- See `rf-frontend/architecture.md`
+- **No high-IF / 2nd-zone sampling.** Stage 1 is the LTC2145-14 at 125 MSPS
+  (Nyquist 62.5 MHz); Stage 2 is the ADC3668 at 250 MSPS. Beat bandwidth is set
+  by the FDMA channel plan (~50 MHz for 4-FDM×2-CDM, ~100 MHz for 8-FDM).
+- **Aperture jitter is no longer the binding constraint.** Sampling a few-tens-
+  of-MHz beat signal relaxes the jitter requirement by orders of magnitude vs.
+  sampling a 10 GHz carrier — this is *why* dechirp-at-the-antenna recovers ENOB.
+- **IQ is generated digitally, after sampling.** The dechirp mixer is real; a
+  Hilbert FIR in the edge FPGA produces complex IQ (>60 dB image rejection).
+- **Oversampling + decimation still buys ENOB.** The beat bandwidth is well
+  below Nyquist, so the FPGA's CIC/half-band decimation gives the usual
+  ~3 dB/octave processing gain (e.g. LTC2145-14 ~12.0 → ~13.1 ENOB).
+- **Anti-aliasing LPF tracks the ADC rate**, not the RF band — see the
+  post-mixer LPF note in `rf-frontend/radar-rx-frontend-edge-digitization.md`
+  §4.3.6.

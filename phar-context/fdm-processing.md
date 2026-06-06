@@ -6,7 +6,7 @@ Each TX is assigned a contiguous, non-overlapping sub-band of the total chirp ba
 
 **Separation** is done by dechirping the composite RX signal against each TX's reference chirp in turn. The matched TX lands near DC; unmatched TXs land at integer multiples of Δf, allowing isolation via bandpass filtering (or equivalently, bin extraction after FFT).
 
-**Range resolution recovery** is achieved by coherently stitching the sub-bands across all TX-RX pairs in post-processing. Since the sub-bands are contiguous and phase-coherent (requires a common clock/reference — e.g. ZCU208 multi-tile sync), the combined bandwidth equals the full system bandwidth, recovering the full range resolution.
+**Range resolution recovery** is achieved by coherently stitching the sub-bands across all TX-RX pairs in post-processing. Since the sub-bands are contiguous and phase-coherent (requires a common clock/reference — in the settled architecture, the shared OCXO master clock plus startup-tone phase calibration; see `rf-frontend/radar-rx-frontend-edge-digitization.md` §2.4), the combined bandwidth equals the full system bandwidth, recovering the full range resolution.
 
 - Per-channel resolution: `c / (2 × B_sub)` where `B_sub = B_total / N_TX`
 - After combining: `c / (2 × B_total)`

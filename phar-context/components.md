@@ -1,5 +1,13 @@
 # RF Frontend Components and BOM
 
+> **⚠️ SUPERSEDED — June 2026.** This BOM is built around the ZCU208 platform
+> and the Option A (S-band direct) / Option B (X-band → IF) decision, neither of
+> which is the current design. The live BOM is in
+> [`radar-rx-frontend-edge-digitization.md`](radar-rx-frontend-edge-digitization.md)
+> §11 (Board A: CMD319C3 LNA, MAMX-011035 / LTC5548 dechirp mixer, LTC2145-14
+> ADC, ECP5 mezzanine, ~$11k for 5 boards). Kept as a historical cost record;
+> do not procure from the tables below.
+
 ## Phase 1 — Single TX + Single RX, Bench Modular
 
 ### Common to Both Architecture Options
