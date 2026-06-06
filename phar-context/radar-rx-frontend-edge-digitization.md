@@ -25,7 +25,9 @@
 
 ## 1. Introduction and System Goals
 
-This document describes the hardware and signal-chain architecture for a software-defined FMCW MIMO radar operating in the 10.0–10.5 GHz band. The primary application is small UAV (drone) detection and tracking at ranges up to 500 m.
+This document describes the hardware and signal-chain architecture for a software-defined FMCW MIMO radar operating in the 10.0–10.5 GHz band. The primary application is small UAV (drone) detection and tracking.
+
+> **On the 1.5 km figure.** The ~1.5 km range used throughout this document is the **v1 prototype goal**, not the end goal. The design's first objective (§1.1) is maximum receive channel count, and the scaling path (§8) tiles to 256 RX / 2,048 virtual elements — range grows from there through the larger MIMO aperture and additional coherent-integration gain as boards are added. The ultimate range target is not yet fixed; treat 1.5 km as a v1 milestone for sizing the prototype, not the destination.
 
 ### 1.1 Primary Objectives
 
@@ -42,7 +44,7 @@ This document describes the hardware and signal-chain architecture for a softwar
 | RF band | 10.0 – 10.5 GHz |
 | Chirp bandwidth | Up to 500 MHz (waveform-defined) |
 | Range resolution | ≈ 1.5 m at 100 MHz total BW via joint processing |
-| Max target range | 500 m |
+| Max target range | ~1.5 km (v1 prototype goal, not the end goal; scales with channel count — see §8) |
 | TX channels | 8 (initial) |
 | RX channels per board | 8 |
 | Stage 1 ADC | 14-bit, 125 MSPS → ~12.0 ENOB |
@@ -155,16 +157,21 @@ Board A is the RF front-end PCB. It houses 8 RX antenna elements, the full analo
 
 Placed between the pre-LNA BPF and the LNA to protect the LNA from transmit leakage, nearby high-power interferers, or accidental close-range illumination. The BPF is upstream of the limiter — passive distributed filters are inherently robust to high power and benefit from seeing a reduced out-of-band spectrum before the limiter.
 
+> **Part not yet settled.** An earlier draft listed an "ADI ADL8111" here. That part number was confabulated — it is not a real PIN limiter (and "ADL" is an ADI active-device prefix, i.e. it would be an amplifier, not a limiter) — and has been removed. Packaged SOT-sized X-band PIN limiters are scarce; at 10 GHz most off-the-shelf limiters are large connectorised modules rather than drop-in SMDs. The realistic candidates are below, and final selection is an open item (§12) because it affects the Rogers layout.
+
 | Parameter | Value |
 |---|---|
-| Part | ADI ADL8111 (or equivalent PIN limiter) |
-| Limiting threshold | +13 dBm |
-| Insertion loss | ~0.8 dB |
-| Recovery time | < 1 µs |
-| NF penalty | ~0.8 dB (directly adds to system NF ahead of LNA) |
-| Package | SOT-363 |
+| Candidate family | MACOM MA4L / MADL-0110-series PIN limiter diodes (≈10 MHz–18 GHz, designed to protect LNAs/mixers/detectors) |
+| Lead X-band candidate | MACOM MADL-011088 — 6–12 GHz, insertion loss ~0.35–0.7 dB, CW incident power handling to ~+39 dBm. **Bare die**, not a packaged SMD. |
+| Insertion loss (assumed) | ~0.5–0.8 dB, candidate-dependent (adds directly to system NF ahead of LNA) |
+| Recovery time | < 1 µs (typical for PIN limiters; confirm on the selected part) |
+| Package | **TBD** — bare die assembled into an on-board shunt limiter circuit on the Rogers substrate, or a packaged limiter if a suitable SMD is found |
 
-The 0.8 dB insertion loss adds directly to the system noise figure ahead of the LNA. At 0.95 dB LNA NF, the combined front-end NF becomes approximately 1.75 dB — acceptable for a 500 m drone detection system.
+**Two honest paths, to be resolved in evaluation:**
+- **MADL die + on-board shunt limiter circuit** on the Rogers board — standard practice at X-band, but adds RF design work and a layout dependency.
+- **Leave the limiter as a TBD line** in the BOM pending evaluation, since the choice affects the Rogers layout.
+
+Assuming ~0.5–0.8 dB insertion loss until the part is fixed, the limiter loss adds directly to the system noise figure ahead of the LNA. At 0.95 dB LNA NF, the combined front-end NF lands on the order of ~1.5–1.75 dB — acceptable for the v1 prototype's sensitivity budget. Pin down the exact figure once the part is chosen.
 
 #### 4.3.3 LNA
 
@@ -640,6 +647,7 @@ ADC3668 is not pin-compatible with LTC2145-14. Stage 2 is a new Board A. The FPG
 | HMC213BMS8E | 1.5–4.5 GHz mixer, not X-band | MACOM MAMX-011035 (primary), ADI LTC5548 (budget) |
 | AD9628 | Being discontinued; misidentified as 14-bit | Removed |
 | AD9648-125 | $87 was 1ku ADI list price; real price ~$140 | Replaced by LTC2145-14 at same real price with better SFDR and lower power |
+| ADL8111 | Confabulated part number — not a real PIN limiter (ADL is an ADI active-device/amplifier prefix) | MACOM MADL-0110-series PIN limiter; selection pending — see §4.3.2 and §12 |
 
 ### 11.2 Correct Active RF Parts
 
@@ -656,7 +664,7 @@ ADC3668 is not pin-compatible with LTC2145-14. Stage 2 is a new Board A. The FPG
 | Ref | Component | Part | Qty | Unit price | Line total |
 |---|---|---|---|---|---|
 | U1–U8 | LNA | Qorvo CMD319C3 | 8 | $48.97† | $392 |
-| U9–U16 | PIN Limiter | ADI ADL8111 (or equiv) | 8 | ~$4 | ~$32 |
+| U9–U16 | PIN Limiter | **TBD** — MACOM MADL-011088 die (+ on-board shunt circuit) lead candidate | 8 | ~$4 (est.) | ~$32 (est.) |
 | U17–U24 | Dechirp mixer | MACOM MAMX-011035 | 8 | $61.33 | $491 |
 | *(alt)* | *(Budget mixer)* | *ADI LTC5548IUDB* | *8* | *$24.01* | *$192* |
 | FL1–FL8 | Post-mixer LPF | Mini-Circuits LFCN-80+ | 8 | ~$8 | $64 |
@@ -721,7 +729,7 @@ Primary cost drivers: ADC ($560, 25%), LNA ($392, 18%), mixer ($491, 22%). Würt
 
 | Item | Description | Priority |
 |---|---|---|
-| PIN limiter part confirm | Confirm ADL8111 availability and price; verify +13 dBm threshold is sufficient for worst-case TX leakage scenario | Medium |
+| PIN limiter part selection | Select an X-band PIN limiter. MACOM MADL-011088 (6–12 GHz) is the lead candidate but is a bare die needing an on-board shunt limiter circuit; evaluate any packaged SMD alternatives. Affects the Rogers layout. Verify insertion loss, incident-power handling, and recovery time against the worst-case TX-leakage scenario | Medium |
 | CMD319C3 stock | **Order immediately** — 35-week factory lead time; 455 in stock at Digikey now; need 40 units | High |
 | LTC2145-14 stock | Confirm LTC2145IUP-14#PBF stock at Digikey for 20 units (5 boards × 4 chips) | High |
 | ADC3668 price | Confirm ADC3668IRTD exact price at Digikey before Stage 2 BOM lock | High |

@@ -9,7 +9,9 @@ those files into context. You do not need to load all files at once.
 
 ## Project Summary
 Bistatic phased array FMCW MIMO radar at X-band 10.0–10.5 GHz, for small-UAV
-detection to ~500 m. Settled architecture: **analogue dechirp at the antenna →
+detection (~1.5 km is the v1 prototype goal, not the end goal — range scales
+with channel count, see the scaling path). Settled architecture:
+**analogue dechirp at the antenna →
 commodity ADC per channel → Lattice ECP5 edge FPGA (Hilbert + decimation +
 SerDes) → fibre → GPU/CPU host** (CUDA range/Doppler/beamforming/CFAR).
 Self-contained "Board A" (8 RX) tiles 1→32 boards. No ZCU208/RFSoC, no analogue
