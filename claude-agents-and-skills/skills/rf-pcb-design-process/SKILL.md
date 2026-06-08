@@ -9,16 +9,19 @@ This skill is the **mechanics** of an iterative, simulation-driven RF / microwav
 
 The skill assumes **KiCad** for schematic and layout and **OpenEMS** for EM simulation. The simulation entry point depends on which **simulation mode** the iteration uses (see next section).
 
-## How iterations are tracked: one repo, one commit per iteration
+## How iterations are tracked: one tagged commit per iteration, one structure at a time
 
-The whole project is a **single git repository**, initialized at project start. There is **one working simulation set** (`sim/`) that mutates in place from one iteration to the next — the model and parameters are never duplicated into per-iteration directories. Each iteration is **one commit, tagged `iter-NNN`**. Git history *is* the snapshot mechanism:
+A board is **one git repository** containing one or more independent EM **structures** (the patch element, an array, each filter, the IF termination …). Each structure has its own working simulation set (`structures/<name>/sim/`) that mutates in place from one iteration to the next, its own iteration records, and its own `history.json` — because their geometries and acceptance criteria are unrelated and they converge independently. Within a structure the model and parameters are never duplicated into per-iteration directories.
 
-- To recover an iteration's exact inputs: `git checkout iter-007`.
-- To see what changed between two iterations: `git diff iter-006 iter-007 -- sim/`.
+The repo is initialized at project start (`git init`). Give the board design its **own repository**, not a subtree of a software repo, so its iteration tags don't collide with the software project's release tags. Each iteration is **one commit, tagged `<structure>/iter-NNN`** — the tag is namespaced by structure so the same `iter-NNN` number is reusable across structures in the one repo (git tags permit `/`). Git history *is* the snapshot mechanism:
 
-This keeps the filesystem flat and small, and makes the diff between iterations a one-line parameter change instead of two near-identical directory trees.
+- Recover an iteration's exact inputs: `git checkout patch-element/iter-007`.
+- List a structure's iterations: `git tag --list 'patch-element/*'`.
+- Diff two iterations: `git diff patch-element/iter-006 patch-element/iter-007 -- structures/patch-element/sim/`.
 
-**What is committed:** the working simulation set (`sim/`), the KiCad project (`kicad/`), the per-iteration markdown records (`iterations/iter-NNN.md`), and the machine-readable trend file (`history.json`). These are all small text and diff cleanly.
+This keeps the filesystem flat and small (one mutating `sim/` per structure, not per-iteration copies), and makes the diff between iterations a one-line parameter change.
+
+**What is committed:** each structure's `sim/`, the KiCad project (`kicad/`), the per-iteration markdown records (`structures/<name>/iterations/iter-NNN.md`), and the per-structure machine-readable trend file (`structures/<name>/history.json`). These are all small text and diff cleanly.
 
 **What is gitignored:** `raw/` and `plots/` — the regenerable bulk (touchstone files, field dumps, logs, images). They are reproducible by checking out the iteration tag and re-running the model, so they never enter git history. The *numbers* extracted from a run are preserved in `history.json` and the iteration markdown, which is all that needs to survive.
 
@@ -33,47 +36,53 @@ An RF PCB project commonly uses one or both modes. The agent picks the mode per 
 
 ## Directory layout
 
-One directory per design project — and that directory is one git repo:
+One git repo per **board**; shared context lives at the root, and each EM **structure** is a self-contained design loop under `structures/`:
 
 ```
-<project>/                          # one git repo, git init at project start
+<board>/                            # one git repo, git init at project start (its own repo, not a software subtree)
 ├── .gitignore                      # ignores raw/ and plots/ (regenerable bulk)
-├── goals.md                        # the contract — written first
-├── stackup.md                      # layer stackup, materials, vendor
-├── tooling.md                      # tool versions + calibration record
+├── goals.md                        # BOARD-level: function, signal chain, board-wide constraints + structure index
+├── stackup.md                      # SHARED — one substrate/stackup for every structure
+├── tooling.md                      # SHARED — tool versions + calibration record
 ├── references/                     # datasheets, app notes, prior-art measurements
-├── kicad/                          # KiCad project — Mode B: input; Mode A: receives final geometry
-├── sim/                            # SINGLE working simulation set — mutates in place, committed
-│   ├── model.py                    # OpenEMS driver — Mode A: parametric CSXCAD; Mode B: gerber2ems wrapper
-│   ├── params.yaml                 # parameters defining the CURRENT iteration
-│   ├── mesh.yaml                   # mesh resolution (Mode A) / gerber2ems config (Mode B)
-│   ├── ports.yaml                  # port definitions, excitation
-│   └── gerber/                     # Mode B only: gerbers + drill + stackup snapshot fed to gerber2ems
-├── raw/                            # GITIGNORED — touchstone, field dumps, log, summary.json (regenerable)
-├── plots/                          # GITIGNORED — S-param plots, smith charts, field images (regenerable)
-├── iterations/
-│   ├── iter-001.md                 # one file per iteration: hypothesis, param-diff, results, notes
-│   └── iter-NNN.md
-├── history.json                    # machine-readable per-iteration summaries — the trend-plot source
+├── kicad/                          # KiCad project — the board; structures land here as footprints
+├── structures/
+│   ├── <structure>/                # one self-contained design loop (e.g. patch-element, prelna-bpf)
+│   │   ├── goals.md                # THIS structure's acceptance criteria (units + thresholds)
+│   │   ├── sim/                    # SINGLE working simulation set for this structure — mutates in place
+│   │   │   ├── model.py            # OpenEMS driver — Mode A: parametric CSXCAD; Mode B: gerber2ems wrapper
+│   │   │   ├── params.yaml         # parameters defining the CURRENT iteration
+│   │   │   ├── mesh.yaml           # mesh resolution (Mode A) / gerber2ems config (Mode B)
+│   │   │   ├── ports.yaml          # port definitions, excitation
+│   │   │   └── gerber/             # Mode B only: gerbers + drill + stackup snapshot fed to gerber2ems
+│   │   ├── raw/                    # GITIGNORED — touchstone, field dumps, log, summary.json
+│   │   ├── plots/                  # GITIGNORED — S-param plots, smith charts, field images
+│   │   ├── iterations/
+│   │   │   ├── iter-001.md         # one file per iteration: hypothesis, param-diff, results, notes
+│   │   │   └── iter-NNN.md
+│   │   └── history.json            # this structure's per-iteration summaries — its trend-plot source
+│   └── <structure-2>/ …
 └── final/
-    ├── summary.md                  # postmortem: journey + final + open risks
+    ├── summary.md                  # board postmortem: per-structure journeys + final + open risks
     └── manufacturing/              # DRC report, fab notes, panelization, exported gerbers/STEP/BOM
 ```
 
-The final design source is `kicad/` at the `final` tag; `final/manufacturing/` holds the exported fabrication outputs and reports.
+`stackup.md` and `tooling.md` live once at the board root — every structure shares the one substrate and the one calibrated solver setup. The final design source is `kicad/` at the `final` tag; `final/manufacturing/` holds the exported fabrication outputs and reports.
 
 ## Git workflow per iteration
 
+Paths below are relative to the structure directory `structures/<structure>/`.
+
 1. Edit `sim/params.yaml` (and `sim/model.py` only if the structure itself changed). One hypothesis per iteration.
 2. Run `sim/model.py`. It writes `raw/` outputs including `raw/summary.json`, and `plots/`.
-3. Append `raw/summary.json` into `history.json` under the new iteration number (schema below), and write `iterations/iter-NNN.md`.
-4. Commit and tag:
+3. Append `raw/summary.json` into this structure's `history.json` under the new iteration number (schema below), and write `iterations/iter-NNN.md`.
+4. Commit and tag (tag namespaced by structure):
    ```
-   git add sim/ kicad/ iterations/iter-NNN.md history.json
-   git commit -m "iter-NNN(<project>): <hypothesis one-liner>"
-   git tag iter-NNN
+   git add structures/<structure>/sim/ structures/<structure>/iterations/iter-NNN.md structures/<structure>/history.json kicad/
+   git commit -m "iter-NNN(<structure>): <hypothesis one-liner>"
+   git tag <structure>/iter-NNN
    ```
-   The commit message **identifies both the iteration and the project**. The tag is the recovery handle — the iteration markdown does not store a SHA.
+   The commit message **identifies both the iteration and the structure**. The tag `<structure>/iter-NNN` is the recovery handle — the iteration markdown does not store a SHA.
 
 `parent` (logical lineage) is recorded in the iteration markdown and may differ from the git parent: if iteration 7 logically branches from iteration 3 rather than 6, the git history is still chronological but `parent: 3` records the design lineage. Keep history linear; the `parent` field is the source of truth for lineage.
 
@@ -84,7 +93,7 @@ Each template below is what should appear in the file when first created. Tables
 ### `.gitignore`
 
 ````gitignore
-# Regenerable simulation bulk — recreate by `git checkout iter-NNN` and re-running sim/model.py.
+# Regenerable simulation bulk — recreate by `git checkout <structure>/iter-NNN` and re-running sim/model.py.
 # The numbers that matter survive in history.json and the iteration markdown.
 raw/
 plots/
@@ -181,10 +190,11 @@ Re-run when: OpenEMS / CSXCAD version changes, mesh strategy changes, stackup ch
 
 ### `sim/params.yaml`
 
-The current iteration's parameters. This file mutates in place each iteration; its full state at iteration N is recoverable with `git checkout iter-NNN`.
+The current iteration's parameters. This file mutates in place each iteration; its full state at iteration N is recoverable with `git checkout <structure>/iter-NNN`.
 
 ````yaml
 iteration: 7
+structure: patch-element             # which structure's design loop this belongs to
 date: 2026-05-26
 parent: 6                            # logical lineage; null only for iter-001
 mode: parametric                     # "parametric" (Mode A) or "gerber2ems" (Mode B)
@@ -298,11 +308,12 @@ ports:
 
 ### `history.json`
 
-The machine-readable contract and the source for any trend plot across the project. One entry appended per iteration; the per-criterion object is exactly the `raw/summary.json` schema, nested under `iterations[]`. Keep criterion keys identical across iterations so a small script can plot any criterion over the whole history without parsing markdown.
+One `history.json` **per structure** — the machine-readable contract and the source for that structure's trend plots. One entry appended per iteration; the per-criterion object is exactly the `raw/summary.json` schema, nested under `iterations[]`. Keep criterion keys identical across iterations **of the same structure** so a small script can plot any criterion over its history without parsing markdown. (Different structures carry different criteria — that is why each gets its own file.)
 
 ````json
 {
-  "project": "<project>",
+  "board": "<board>",
+  "structure": "<structure>",
   "iterations": [
     {
       "iteration": 7,
@@ -328,9 +339,10 @@ One file per iteration. Folds the old `params`-diff, `results`, and `notes` into
 # Iteration <N> — <one-line title>
 
 - date: <YYYY-MM-DD>
+- structure: <structure name, e.g. patch-element>
 - parent: <N-1 or logical parent; null only for iter-001>
 - mode: <parametric | gerber2ems>
-- recover inputs: `git checkout iter-NNN`
+- recover inputs: `git checkout <structure>/iter-NNN`
 
 ## Hypothesis
 <from sim/params.yaml — restated for readability>
@@ -373,7 +385,7 @@ post-processing from `history.json`; omit this section in iter-001.
 - Peak gain direction: <θ, φ>
 
 ## What actually happened
-<observation, citing specific plots in plots/ — regenerate with `git checkout iter-NNN` if needed>
+<observation, citing specific plots in plots/ — regenerate with `git checkout <structure>/iter-NNN` if needed>
 
 ## Why — physical interpretation
 <not just "S11 went down" but "shortening the arm raised resonance because the
@@ -461,13 +473,13 @@ fit one of those patterns, add it to this section before introducing it.
 
 ## Conventions and rules
 
-1. **Past iterations are immutable — git enforces it.** Each iteration is a commit tagged `iter-NNN`; never rewrite history (no `--amend`, no rebase across a published iteration). If a bug is found in iter-003's sim, create iter-004 that re-runs it correctly and explain in iter-004's markdown. Editing history breaks the story the postmortem will tell.
-2. **One git repo per project, initialized at project start.** `git init` the project directory and commit the scaffold (`goals.md`, `stackup.md`, `tooling.md`, `.gitignore`) before iter-001. The whole project — `sim/`, `kicad/`, iteration records, `history.json` — is tracked together; the KiCad project lives in the same repo, so each iteration's commit captures the design and the simulation together. No file copying for snapshots; git is the snapshot mechanism. (If KiCad must live in a separate repo for an external reason, record its SHA in the iteration markdown — but the default is one repo.)
+1. **Past iterations are immutable — git enforces it.** Each iteration is a commit tagged `<structure>/iter-NNN`; never rewrite history (no `--amend`, no rebase across a published iteration). If a bug is found in iter-003's sim, create iter-004 that re-runs it correctly and explain in iter-004's markdown. Editing history breaks the story the postmortem will tell.
+2. **One git repo per board — its own repo, not a software subtree.** `git init` the board directory and commit the scaffold (`goals.md`, `stackup.md`, `tooling.md`, `.gitignore`) before the first iteration. Keep it separate from any software/firmware repo so the board's iteration tags (`<structure>/iter-NNN`) don't collide with the software project's release tags. The whole board — every structure's `sim/`, `kicad/`, iteration records, per-structure `history.json` — is tracked together so each iteration's commit captures design and simulation together. No file copying for snapshots; git is the snapshot mechanism.
 3. **`raw/` and `plots/` are gitignored.** They are regenerable from `sim/` at any iteration tag. The numbers that must survive live in `history.json` and the iteration markdown. Do not commit field dumps or images.
-4. **Each iteration is one commit, tagged `iter-NNN`, with a project-and-iteration commit message.** Format: `iter-NNN(<project>): <hypothesis one-liner>`. The tag is the recovery handle; the markdown stores no SHA.
+4. **Each iteration is one commit, tagged `<structure>/iter-NNN`, with an iteration-and-structure commit message.** Format: `iter-NNN(<structure>): <hypothesis one-liner>`. The structure-namespaced tag is the recovery handle; the markdown stores no SHA.
 5. **Zero-pad iteration numbers** (`iter-001`, not `iter-1`) in both file names and tags so sort matches chronological order. Three digits supports up to 999; if you hit that you probably need a structural rethink instead.
 6. **`parent` is mandatory for iter ≥ 002.** Designs branch; the parent chain (recorded in the markdown and `history.json`) is how lineage is reconstructed, independent of git's chronological parent. Only iter-001 has `parent: null`.
-7. **`history.json` is the machine-readable contract.** Append one entry per iteration. Keep the criterion keys identical across iterations of the same project so a small script can plot any criterion over the iteration history without parsing markdown.
+7. **`history.json` is the machine-readable contract — one per structure.** Append one entry per iteration to that structure's file. Keep the criterion keys identical across iterations of the same structure so a small script can plot any criterion over its history without parsing markdown. Different structures carry different criteria, which is why each has its own file.
 8. **`final/` does not exist until all `[sim]` criteria pass**, at which point the design source is tagged `final`. If tempted to create it early because "we're close enough", you aren't — keep iterating or escalate the criterion as infeasible.
 9. **Record tool versions in `tooling.md`** and re-run the calibration reference if any version changes mid-project. Without this, "the simulation used to give X" becomes unfalsifiable.
 10. **Parametric simulation models, not hardcoded geometry.** A `model.py` that rebuilds from `params.yaml` makes the next iteration a yaml edit; hardcoded coordinates make it a rewrite. Non-parametric models are allowed when geometry resists parameterization, but call them out in the iteration markdown.
@@ -479,7 +491,7 @@ fit one of those patterns, add it to this section before introducing it.
 
 ## First actions when invoked
 
-1. **New project:** if no `goals.md` exists, write one with the user before any layout. Push back on non-measurable criteria. Refuse to start the loop until every criterion is tagged `[sim] / [bench] / [ext]`. Then `git init` the project and commit the scaffold (`goals.md`, `stackup.md`, `tooling.md`, `.gitignore`).
-2. **Existing project:** if `goals.md` exists, check the current `sim/params.yaml` is consistent with it and that the criteria-tagging is current. `git tag` lists the iterations on disk; `history.json` is the numeric history.
-3. **"Start a new iteration":** the working set in `sim/` is already the parent's state (it mutates in place). Edit `sim/params.yaml` — bump `iteration`, set `parent`, write the hypothesis and `changes_from_parent`, apply the geometry change — then **stop before running** so the user (or agent) can confirm the hypothesis is worth running. Do not commit yet; uncommitted changes are trivially reverted if the hypothesis is rejected. After the run, log the results, append to `history.json`, write `iterations/iter-NNN.md`, then commit and `git tag iter-NNN`.
-4. **"Present the design":** read every `iterations/*.md` and `history.json` and synthesize `final/summary.md` from what's recorded. Tag the design source `final`. Do not invent narrative — use the iteration log as the source of truth.
+1. **New board:** if no board `goals.md` exists, write one with the user before any layout — function, signal chain, board-wide constraints, and the list of structures to design. Push back on non-measurable criteria. Refuse to start any structure's loop until every one of its criteria is tagged `[sim] / [bench] / [ext]`. Then `git init` the board's own repository (separate from any software repo, so iteration tags don't collide) and commit the scaffold (`goals.md`, `stackup.md`, `tooling.md`, `.gitignore`).
+2. **Existing board / structure:** check the structure's `sim/params.yaml` is consistent with its `goals.md` and that the criteria-tagging is current. `git tag --list '<structure>/*'` lists that structure's iterations; its `history.json` is the numeric history.
+3. **"Start a new iteration":** the working set in `structures/<structure>/sim/` is already the parent's state (it mutates in place). Edit `sim/params.yaml` — bump `iteration`, set `parent`, write the hypothesis and `changes_from_parent`, apply the geometry change — then **stop before running** so the user (or agent) can confirm the hypothesis is worth running. Do not commit yet; uncommitted changes are trivially reverted if the hypothesis is rejected. After the run, log the results, append to the structure's `history.json`, write `iterations/iter-NNN.md`, then commit and `git tag <structure>/iter-NNN`.
+4. **"Present the design":** read every structure's `iterations/*.md` and `history.json` and synthesize `final/summary.md` from what's recorded. Tag the design source `final`. Do not invent narrative — use the iteration log as the source of truth.
