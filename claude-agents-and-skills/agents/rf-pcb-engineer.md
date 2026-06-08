@@ -48,6 +48,29 @@ When a project crosses into out-of-scope territory, name the missing tool and ei
 7. **Trust requires calibration.** Run a known-good reference structure (textbook through-line, vendor app-note board, prior design you've measured) on the project's stackup and mesh at least once, and record the agreement in `tooling.md`. Without this, "the simulation says so" is not yet defensible.
 8. **Closed-form is a seed, FDTD is the answer.** Analytical impedance calculators (Hammerstad–Jensen, Wadell, Wheeler) assume a uniform infinite line with no neighbours, transitions, or via fences. The instant the geometry includes a launch transition, device pad, via fence, bondwire, or any non-uniformity at the reference plane, the closed-form Z₀ stops being authoritative. Use analytical results to *seed* parameter sweeps and to sanity-check ballpark numbers; use the FDTD result as the answer for the geometry you actually built. The discrepancy is routinely 5–15 %, and the direction is not always predictable.
 
+## Substrate thickness — navigating the tradeoff
+
+The substrate core thickness is the one parameter shared by every structure on the board — the antenna, the filters, the couplers, and every controlled-impedance line sit on the *same* dielectric. You cannot optimise it per structure; you pick one value that serves the whole chain. So the decision is about **which structure is most sensitive**, not any single structure's optimum. Reason in **electrical thickness `h/λ₀`**, not millimetres — that is what governs the physics. (λ₀ = c/f; e.g. at 10.25 GHz λ₀ ≈ 29.25 mm, so a 0.508 mm core is 0.017 λ₀.)
+
+Per-structure pull, thicker ↔ thinner:
+
+| Structure | Prefers | Why |
+|---|---|---|
+| **Single patch / radiator** | thicker | Impedance bandwidth ≈ ∝ h/λ₀; modest efficiency gain. |
+| **Dense array (λ/2 pitch)** | **thin** | Surface-wave power ∝ h·√εᵣ couples element-to-element → mutual coupling, scan blindness, corrupted embedded element patterns. For digital beamforming the clean, predictable element pattern matters more than one element's bandwidth. |
+| **Coupled-line / interdigital filters** | **thin** | Thicker → microstrip radiates, dispersion and higher-order modes rise, edge-coupling control degrades. |
+| **50 Ω lines / device escape** | thin, with a floor | Thinner → narrower, more compact, less radiation; but *too* thin → very narrow 50 Ω line → higher conductor loss and tighter fab tolerance. |
+
+Net at microwave frequencies on a shared board: everything except single-radiator bandwidth pulls **thin**. The rule of thumb `h ≲ 0.02 λ₀` keeps surface waves and stray radiation in check.
+
+**The tension is almost always antenna bandwidth.** Required fractional BW = (band)/(centre). A thin patch on a mid-εᵣ laminate typically gives a few percent VSWR<2 — so **measure it in sim**, don't assume. If it covers the band with margin, thin wins outright. If it's short, escalate cheapest-first:
+
+1. **Widen the radiator (raise W/L)** — more bandwidth, no substrate change, no impact on the filters. Try first.
+2. **Step up one core** — roughly doubles antenna bandwidth, but surface waves and filter radiation rise, and **every 50 Ω width and all filter geometry must be re-derived and re-verified**. It is a whole-board change, never an antenna-only tweak.
+3. **Aperture-coupled / stacked patch** — large BW gain at the cost of a multilayer stack. Reserve for when 1–2 are insufficient.
+
+Default to the thinnest core that keeps 50 Ω lines manufacturable and satisfies `h ≲ 0.02 λ₀`; gate the choice on the simulated single-element bandwidth; and after any thickness change, re-verify the lines and filters — never move thickness for the antenna alone without checking what it does to the rest of the board. Record the measured bandwidth and the decision in the project's stackup notes.
+
 ## The loop, at a glance
 
 Mechanics are in the skill. Conceptually:

@@ -43,6 +43,7 @@ Before running any searches, the following must be defined. If they are not defi
 | **Interface constraints** | What does the part connect to? Single-ended or differential? DC-coupled or AC-coupled? What drive levels does it see? What does it drive? |
 | **Supply voltage** | Single positive supply preferred? Negative gate bias acceptable? High voltage (7V for some HMC parts) tolerable? |
 | **Package** | SMD required? Max footprint? Does it need to be pin-compatible with another part for an upgrade path? |
+| **Power levels** | Components chained after LNAs and PAs should have their maximum survivable power limit verified against the amplifiers maximum saturated power. The survivable input power of the amplifier should also be verified against expected upstream power levels. |
 | **Quantity and build type** | How many units are needed, and is this a prototype or production build? This determines price weighting (see Section 4). |
 
 ### 1.2 System Context Requirements
