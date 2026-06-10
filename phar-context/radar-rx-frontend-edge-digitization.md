@@ -168,7 +168,7 @@ Section §4.7 gives the physical layout of both boards.
 - Centre frequency: 10.25 GHz
 - Element spacing: λ/2 = 14.6 mm
 - Total aperture: 116.8 mm
-- Feed: corporate microstrip (equal-path-length)
+- Feed: 8 independent 50 Ω microstrip feed lines — one per element, each running directly to its own RF chain input (BPF → Limiter → LNA). No combining network. Keep each feed trace under ~3 mm to limit NF penalty (§4.3.3).
 - Substrate: Rogers 4003C (same board as RF chain)
 
 ### 4.3 RF Board — RF Signal Chain (per RX channel)

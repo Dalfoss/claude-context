@@ -64,7 +64,7 @@ One git repo = a **PCB-design workspace** (kept separate from software repos). S
 │   │   │   │   ├── ports.yaml        # port definitions, excitation
 │   │   │   │   └── gerber/           # Mode B only: gerbers + drill + stackup snapshot fed to gerber2ems
 │   │   │   ├── raw/                  # GITIGNORED — touchstone, field dumps, log, summary.json
-│   │   │   ├── plots/                # GITIGNORED — S-param plots, smith charts, field images
+│   │   │   ├── plots/                # GITIGNORED — one subdir per run (plots/iter-NNN/) so each iteration's plots survive; sweep points use plots/iter-NNN-<label>/
 │   │   │   ├── iterations/
 │   │   │   │   ├── iter-001.md       # one file per iteration: hypothesis, param-diff, results, notes
 │   │   │   │   └── iter-NNN.md
@@ -82,10 +82,11 @@ The `.venv/` and `openEMS/` are built once per README and shared by every board.
 
 `stackup.md` is not a fixed precondition — the stackup (substrate, thickness, copper, finish) is itself an engineering decision and may change as evidence accumulates (e.g. a thin core the antenna cannot match across band — see the rf-pcb-engineer agent's substrate-thickness guidance). What is immutable is git history, not the stackup choice.
 
-Two rules keep a mutable stackup coherent across the per-structure loops:
+Three rules keep a mutable stackup coherent across the per-structure loops:
 
 1. **Changing the stackup is a board-level event, not a single structure's iteration.** The one substrate is shared by every structure, so a change invalidates every structure's prior `[sim]` passes (they were proven on the old stackup) and forces each to re-verify. Update `stackup.md` and its decision log, re-run the calibration reference (`tooling.md`), and re-open the affected structures. The change and its rationale are recorded in `stackup.md`, not buried in one structure's iteration log.
-2. **Exploring a candidate stackup is done inside the most-sensitive structure.** Run the comparison as ordinary iterations of whichever structure the change most affects (usually the antenna or the tightest filter), varying the substrate fields in that structure's `sim/params.yaml`. `params.yaml` is authoritative for a given run; it must agree with `stackup.md` except in these explicit stackup-exploration iterations. When a candidate wins, adopt it board-wide via rule 1.
+2. **The stackup window is bounded by every consumer, not just the EM structures.** `stackup.md` carries a **constraint register** (template below): one row per consumer of the shared stackup, each declaring a hard floor, a hard ceiling, a soft preference, and the reason. The consumers include the EM structures (antenna, filters, 50 Ω lines) **and the things OpenEMS cannot simulate but that still bound the laminate** — the packages of the already-chosen active parts (QFN/BGA paddle-via inductance, thermal path, RF-pin launch geometry), assembly, and fab capability. The register is filled at Phase 0, before any structure loop optimises within the window, and the feasible window is the intersection of all rows. If the window is empty, that is a Phase-0 finding that forces a topology/layer-count decision, not something to discover after a structure has spent iterations.
+3. **Exploring a candidate stackup is done inside the most-sensitive structure — but "sensitive" is not "authoritative."** Run the comparison as ordinary iterations of whichever structure the change most *benefits* (usually the antenna or the tightest filter), varying the substrate fields in that structure's `sim/params.yaml`. That structure is the most sensitive to the change; it is **not** necessarily the structure that *bounds* the parameter (e.g. the antenna wants a thick core for bandwidth, but the QFN active parts cap thickness — the binding constraint lives outside any EM structure). A stackup-exploration iteration must check its proposed value against the rule-2 constraint register and is invalid if it leaves the feasible window. `params.yaml` is authoritative for a given run; it must agree with `stackup.md` except in these explicit stackup-exploration iterations. When a candidate inside the window wins, adopt it board-wide via rule 1.
 
 Often the criterion that triggers a stackup change is already written into a structure's `goals.md` (e.g. "S11 < −10 dB across the band" on a thin core), so the stackup decision falls out of the normal pass/fail loop rather than being a separate process.
 
@@ -187,6 +188,24 @@ Every criterion has units and a threshold. Each is tagged with its verification 
 **Dk uncertainty**: ±0.2 across batches — record the value used in each iter's `sim/params.yaml`
 **Controlled-impedance reference**: <50 Ω microstrip L1-ref-L2 → width 0.33 mm>
 
+## Constraint register
+
+Every consumer of the shared stackup, with the bound it imposes. Filled at Phase 0,
+before any structure loop optimises. Include the EM structures **and** the
+non-simulatable consumers — the packages of the already-chosen active parts, the
+assembly process, and the fab. The feasible core-thickness window is the
+intersection of the floor/ceiling columns; a structure's stackup-exploration
+iteration is invalid if it leaves this window. "Pull" is the soft preference.
+
+| Consumer | Floor | Ceiling | Pull | Reason (cite datasheet / rule) |
+|----------|-------|---------|------|--------------------------------|
+| Antenna (single element BW) | — | — | thicker | Impedance BW ∝ h/λ₀; needs <required fractional BW> |
+| Dense array (λ/2 pitch) | — | <h ≲ 0.02 λ₀> | thin | Surface-wave coupling ∝ h·√εᵣ |
+| Coupled-line / interdigital filters | — | <h ≲ 0.02 λ₀> | thin | Thicker → radiation, dispersion, mode rise |
+| 50 Ω lines / device escape | <fab min trace> | — | thin | Too thin → narrow line, conductor loss, tolerance |
+| **Active-part package (e.g. 3×3 QFN LNA/mixer)** | — | <≈0.2–0.5 mm> | **thin** | Paddle-via inductance to ground (stability/NF) + RF-pin launch must mate to pad pitch; cite the part datasheet's ground/land guidance |
+| Assembly / fab | <vendor min> | <vendor max> | — | Build capability, controlled-Z tolerance |
+
 ## Decision log
 
 The stackup is mutable; every change is a board-level event (re-verify all structures, re-run calibration). One row per decision.
@@ -273,6 +292,7 @@ OpenEMS driver. The driver's *internals* differ by mode; its *interface* (inputs
   - raw touchstone (`raw/<port-pair>.sNp`)
   - field dumps if requested (`raw/E_field_*.h5`, `raw/H_field_*.h5`)
   - one `raw/summary.json` keyed by acceptance-criterion name (schema below).
+  - **plots into a per-run subdir `plots/iter-NNN/`** (not the `plots/` root), so each iteration's plots survive instead of being overwritten by the next run. Default the subdir name to the iteration number; allow an override (e.g. an env var) so parameter-sweep points within one iteration land in distinct subdirs `plots/iter-NNN-<label>/`. The FDTD solve is expensive, so plots that can only be regenerated by re-running are worth keeping locally even though `plots/` is gitignored — you get the visual history without re-solving, and git stays clean.
 - The iteration-logging step then appends `raw/summary.json` into `history.json` under the iteration number; `raw/` itself is never committed.
 
 **Mode A — parametric (CSXCAD primitives):**
@@ -338,6 +358,8 @@ boundary_conditions:
   y: [PML_8, PML_8]
   z: [PML_8, PML_8]
 ````
+
+The recorded numbers are only valid once **mesh-converged** — stable as the mesh is refined (see the rf-pcb-engineer agent's "the mesh is not the structure" principle). Refine where features are small relative to the cell (narrow gaps, feed tongues, coupled-line spacings); a feature one or two cells across is a red flag. A **convergence check is a legitimate iteration** — same geometry, finer mesh, hypothesis "is iter-N converged?"; record the figure-of-merit deltas and the verdict like any other iteration. Re-running with a changed mesh is a `model.py`/`mesh.yaml` change, so note it in the iteration record.
 
 ### `sim/ports.yaml`
 
