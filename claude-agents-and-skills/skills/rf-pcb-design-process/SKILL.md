@@ -27,13 +27,13 @@ This keeps the filesystem flat and small (one mutating `sim/` per structure), an
 
 **What is committed:** each structure's `sim/`, the board's KiCad project (`<board>/kicad/`), the per-iteration markdown records (`<board>/structures/<name>/iterations/iter-NNN.md`), and the per-structure machine-readable trend file (`<board>/structures/<name>/history.json`). These are all small text and diff cleanly.
 
-**What is gitignored:** the workspace-root `.venv/` and `openEMS/` (regenerable per README), plus every `raw/` and `plots/` (the regenerable simulation bulk — touchstone files, field dumps, logs, images). They are reproducible by checking out the iteration tag and re-running the model, so they never enter git history. The *numbers* extracted from a run are preserved in `history.json` and the iteration markdown, which is all that needs to survive.
+**What is gitignored:** the workspace-root `.venv/` and `openEMS/` (regenerable per README), plus every `raw/` and `plots/` (the regenerable simulation bulk — touchstone files, field dumps, logs, images) and every Mode-B `sim/gerber/` export (regenerated from the committed `.kicad_pcb` with the pinned KiCad version; content pinned by a committed `sim/gerber.sha256` manifest — see Mode B). They are reproducible by checking out the iteration tag and re-running the model, so they never enter git history. The *numbers* extracted from a run are preserved in `history.json` and the iteration markdown, which is all that needs to survive.
 
 ## Simulation modes
 
 An RF PCB project commonly uses one or both modes. The agent picks the mode per structure; the skill defines what each looks like on disk.
 
-- **Mode A — parametric** (default for antennas and novel-structure design). The OpenEMS model is built in Python from CSXCAD primitives, parameterized by `sim/params.yaml`. KiCad is the *output*: the converged geometry is exported as a KiCad footprint at the end of the loop. Tooling pattern: [`matthuszagh/pyems`](https://github.com/matthuszagh/pyems) or hand-rolled CSXCAD primitives.
+- **Mode A — parametric** (default for antennas and novel-structure design). The OpenEMS model is built in Python from CSXCAD primitives, parameterized by `sim/params.yaml`. KiCad is the *output*: the converged geometry is exported as a KiCad footprint at the end of the loop. Tooling pattern: [`matthuszagh/pyems`](https://github.com/matthuszagh/pyems) or hand-rolled CSXCAD primitives. **Layout rule (added 2026-06-12 after a real defect): EM-verified geometry is NEVER hand-redrawn at layout.** The layout instantiates the converged footprint export verbatim — position/rotation only, no re-derivation of inset/feed/via geometry from floorplan numbers. If a converged structure has no footprint export yet, generate it from the Mode-A model (same `params.yaml`) *before* drawing the layout; a layout generator may only place these exports, plus genuinely layout-owned copper (pours, non-EM routing, outlines).
 - **Mode B — routed-trace verification** (default for SI, impedance, differential-pair work, and verifying matching-network launches on a routed PA board). KiCad is the *input*: the layout is exported as gerbers + drill + stackup, and [`antmicro/gerber2ems`](https://github.com/antmicro/gerber2ems) (typically paired with [`antmicro/kicad-si-simulation-wrapper`](https://github.com/antmicro/kicad-si-simulation-wrapper) to select nets directly from `.kicad_pcb`) builds the OpenEMS simulation. Gerber2ems does **not** model components — capacitors are treated as shorts — so the EM region under simulation is the passive routed structure only. Whole-board simulation is impractical; pick a region of interest.
 
 `sim/params.yaml` records which mode the iteration uses via a `mode:` field. The `sim/` contents differ per mode (below). The `raw/summary.json` → `history.json` contract is identical across both modes, so plots and the postmortem do not need to know which mode produced the numbers.
@@ -44,7 +44,7 @@ One git repo = a **PCB-design workspace** (kept separate from software repos). S
 
 ```
 <workspace>/                          # one git repo, git init at start; NOT a subtree of a software repo
-├── .gitignore                        # ignores .venv/, openEMS/, raw/, plots/, models/ (regenerable bulk)
+├── .gitignore                        # ignores .venv/, openEMS/, raw/, plots/, models/, sim/gerber/ (regenerable bulk)
 ├── README.md                         # how to set up the shared env (venv + openEMS build)
 ├── view-model                        # board-agnostic launcher: open any iteration's CSX XML in AppCSXCAD (template below)
 ├── .venv/                            # GITIGNORED — shared Python env for all boards
@@ -63,7 +63,8 @@ One git repo = a **PCB-design workspace** (kept separate from software repos). S
 │   │   │   │   ├── params.yaml       # parameters defining the CURRENT iteration
 │   │   │   │   ├── mesh.yaml         # mesh resolution (Mode A) / gerber2ems config (Mode B)
 │   │   │   │   ├── ports.yaml        # port definitions, excitation
-│   │   │   │   └── gerber/           # Mode B only: gerbers + drill + stackup snapshot fed to gerber2ems
+│   │   │   │   ├── gerber/           # Mode B only, GITIGNORED: gerbers + drill + stackup fed to gerber2ems — regenerated from kicad/, pinned by the committed manifest
+│   │   │   │   └── gerber.sha256     # Mode B only, committed: hash manifest of the sim/gerber/ export
 │   │   │   ├── raw/                  # GITIGNORED — touchstone, field dumps, log, summary.json
 │   │   │   ├── plots/                # GITIGNORED — one subdir per run (plots/iter-NNN/) so each iteration's plots survive; sweep points use plots/iter-NNN-<label>/
 │   │   │   ├── models/               # GITIGNORED — one subdir per run (models/iter-NNN/): the CSX XML (geometry+mesh+ports) for AppCSXCAD inspection via view-model
@@ -345,7 +346,7 @@ OpenEMS driver. The driver's *internals* differ by mode; its *interface* (inputs
 - Iteration cost: a yaml edit.
 
 **Mode B — gerber2ems:**
-- Snapshot the gerbers + drill + stackup that come out of `kicad-cli pcb export gerbers / drill` into `sim/gerber/`. These are the simulation input and are committed — never modify them by hand.
+- Export the gerbers + drill + stackup via `kicad-cli pcb export gerbers / drill` into `sim/gerber/` — **GITIGNORED, not committed** (decision 2026-06-12): the committed `.kicad_pcb` S-expression is the source of truth and the export is reproducible with the KiCad version pinned in `tooling.md`. **Refill zones before export** so the committed board matches the plot. Commit instead a `sim/gerber.sha256` manifest (hash of every exported file) and record the exact export command in the iteration log; recovering a tag means re-exporting and verifying against the manifest — KiCad-version drift (zone refill, arc tessellation) becomes detectable instead of silent. Never modify exported gerbers by hand. **Exception:** the fab-submitted package in `final/manufacturing/` IS committed byte-exact — it is an external contract artifact, not a regenerable one.
 - The driver calls `gerber2ems` with the project's stackup and the net selection (typically generated via `antmicro/kicad-si-simulation-wrapper` from `.kicad_pcb` and recorded alongside in `sim/nets.yaml`).
 - `mesh.yaml` in this mode holds gerber2ems-specific config (adaptive grid settings, ROI bounding box) rather than CSXCAD mesh primitives.
 - Iteration cost: a KiCad layout edit + gerber re-export. Use Mode B sparingly — Mode A iterates faster.
