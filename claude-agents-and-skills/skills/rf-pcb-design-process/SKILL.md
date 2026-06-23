@@ -31,12 +31,45 @@ This keeps the filesystem flat and small (one mutating `sim/` per structure), an
 
 ## Simulation modes
 
-An RF PCB project commonly uses one or both modes. The agent picks the mode per structure; the skill defines what each looks like on disk.
+**The governing paradigm: EM-extract the passives, then circuit/system co-simulate with the actives, stitched by S-parameters.** No field solver simulates an active device (LNA, mixer), and whole-board EM is both impractical (FDTD mesh/timestep cost explodes with the largest-to-smallest feature ratio) and pointless (actives aren't electromagnetic). So each EM-critical *passive* structure is solved in isolation and exported as S-parameters (Modes A/B); the *active chain* is then assembled from those S-parameters plus the devices' own models (Mode C). **The deliverable is the cascaded chain budget — gain, NF, match, stability — not any single block.** This is the standard RF EM/circuit co-simulation flow (the commercial equivalent is EM in HFSS/Sonnet/Momentum + Harmonic Balance in ADS/AWR); the three modes below are its pieces. The agent picks the mode per structure; the skill defines what each looks like on disk.
 
 - **Mode A — parametric** (default for antennas and novel-structure design). The OpenEMS model is built in Python from CSXCAD primitives, parameterized by `sim/params.yaml`. KiCad is the *output*: the converged geometry is exported as a KiCad footprint at the end of the loop. Tooling pattern: [`matthuszagh/pyems`](https://github.com/matthuszagh/pyems) or hand-rolled CSXCAD primitives. **Layout rule (added 2026-06-12 after a real defect): EM-verified geometry is NEVER hand-redrawn at layout.** The layout instantiates the converged footprint export verbatim — position/rotation only, no re-derivation of inset/feed/via geometry from floorplan numbers. If a converged structure has no footprint export yet, generate it from the Mode-A model (same `params.yaml`) *before* drawing the layout; a layout generator may only place these exports, plus genuinely layout-owned copper (pours, non-EM routing, outlines).
-- **Mode B — routed-trace verification** (default for SI, impedance, differential-pair work, and verifying matching-network launches on a routed PA board). KiCad is the *input*: the layout is exported as gerbers + drill + stackup, and [`antmicro/gerber2ems`](https://github.com/antmicro/gerber2ems) (typically paired with [`antmicro/kicad-si-simulation-wrapper`](https://github.com/antmicro/kicad-si-simulation-wrapper) to select nets directly from `.kicad_pcb`) builds the OpenEMS simulation. Gerber2ems does **not** model components — capacitors are treated as shorts — so the EM region under simulation is the passive routed structure only. Whole-board simulation is impractical; pick a region of interest.
+- **Mode B — routed-trace verification** (default for SI, impedance, differential-pair work, and verifying matching-network launches on a routed PA board). KiCad is the *input*: the layout is exported as gerbers + drill + stackup, and [`antmicro/gerber2ems`](https://github.com/antmicro/gerber2ems) (typically paired with [`antmicro/kicad-si-simulation-wrapper`](https://github.com/antmicro/kicad-si-simulation-wrapper) to select nets directly from `.kicad_pcb`) builds the OpenEMS simulation. Gerber2ems does **not** model components — capacitors are treated as shorts — so the EM region under simulation is the passive routed structure only. Whole-board simulation is impractical; pick a region of interest. **Use this established toolchain — do not hand-roll a KiCad→OpenEMS translator** (a prior project did, hit port-model calibration problems, and parked it; gerber2ems is the maintained path). Mode B verifies *as-routed* reality against the Mode-A coupons — it is a regression gate, and is optional when coupon coverage of the launches/transitions is already trusted.
+- **Mode C — cascade / circuit co-simulation** (default for matching networks, terminations, and the end-to-end chain budget — *this is where "the whole chain in use" is simulated*). No new EM solve and KiCad is not involved: the behaviour is computed in [`scikit-rf`](https://scikit-rf.org) by cascading the EM-extracted passive Touchstone files (the Mode-A/B `raw/*.sNp`) with the active devices' S-parameter/noise models and lumped elements (RLC + parasitics: ESL, mounting-via inductance). `sim/` holds the cascade script plus the input `.sNp`/device models instead of an OpenEMS model. The `mode:` field is `cascade` (pure block cascade, e.g. an input-match network) or `circuit` (lumped-element network, e.g. an IF termination). The same `raw/summary.json` → `history.json` contract carries the cascaded criteria (chain NF, input match, μ-factor stability at bias).
 
-`sim/params.yaml` records which mode the iteration uses via a `mode:` field. The `sim/` contents differ per mode (below). The `raw/summary.json` → `history.json` contract is identical across both modes, so plots and the postmortem do not need to know which mode produced the numbers.
+**Screen and plot device stability before the cascade (added 2026-06-23).** Before an active part's copper is committed, compute its **μ-factor across a wide band — DC → f_max, out-of-band included** (devices oscillate *out* of band far more often than in it: low, from bias-line resonances, and high, near f_max) — **directly from the vendor S-parameter file** in scikit-rf, and **record μ(f) as a `derived` spectrum and plot it** (the same spectrum/plot machinery as any structure). A part that is only conditionally stable (μ < 1 anywhere) is flagged there — with its source/load stability circles — so the surrounding match/termination is designed *out* of the unstable region rather than discovered oscillating at the bench. The Mode-C cascade then re-checks μ in-fixture at the operating bias point (the criterion above); **both the wide-band device screen and the at-bias cascade check are required.**
+
+`sim/params.yaml` records which mode the iteration uses via a `mode:` field (`parametric` | `routed` | `cascade` | `circuit`). The `sim/` contents differ per mode (below). The `raw/summary.json` → `history.json` contract is identical across all modes, so plots and the postmortem do not need to know which mode produced the numbers.
+
+## The layout-landing phase (board generator)
+
+(Added 2026-06-12 from a real project; this is the phase between "all structures converged" and
+"fab export," and it has its own loop distinct from any structure's sim loop.)
+
+When the converged structures land on the actual board, the board is built by a **parametric
+board generator** (`kicad/generate_board.py` reading `kicad/floorplan.yaml`), not by GUI layout —
+same reproducibility argument as Mode A. The loop is: edit floorplan/generator → regenerate →
+render (PNG/SVG via `kicad-cli`) → **human eye-review of the render** → fix → commit. Rules:
+
+- **The generator only places** converged footprint exports (the layout rule above) plus genuinely
+  layout-owned copper (pours, non-EM routing, outlines, mounting).
+- **Active-part copper is reproduced from the vendor reference layout, not invented (added 2026-06-23).**
+  The device land pattern, paddle via array, RF-pin launch, and the bias/decoupling network instantiate
+  the manufacturer's recommended / eval-board layout (rule 17, via `references.md`) — it is layout-owned
+  copper, but *reproduced* verbatim, not derived from floorplan numbers.
+- **The board is deliberately NET-LESS during this phase.** All copper is graphic-equivalent, so
+  DRC's connectivity engine has nothing to false-short — but that means **DRC green = spacing
+  only**. Real connectivity checking arrives only at the later schematic/netlist-integration
+  milestone, which is its own phase and a **user decision to open**.
+- **Guard asserts accumulate in the generator** — one targeted geometric assert per caught defect
+  (material coincidence, lane clearance, corridor keep-outs), plus standing sweeps when a class
+  generalizes (e.g. all-copper-vs-all-via-pads; every bus/star lane endpoint ON its collector).
+  A defect a render reviewer caught once must become an assert.
+- **Render review is a verification step, not a courtesy.** Whoever regenerates the board looks at
+  the render before reporting it clean; netless DRC cannot see what a one-glance look at a PNG can.
+- Phase status lives in the board's `goals.md` (e.g. a pre-layout checklist with per-item state);
+  work the board still needs is named there ("at the next generator pass") — that list, not memory
+  or inference, defines what is pending.
 
 ## Directory layout
 
@@ -53,7 +86,7 @@ One git repo = a **PCB-design workspace** (kept separate from software repos). S
 │   ├── goals.md                      # BOARD-level: function, signal chain, board-wide constraints + structure index
 │   ├── stackup.md                    # this board's substrate/stackup — shared by its structures
 │   ├── tooling.md                    # tool versions + calibration record (this board's stackup)
-│   ├── references/                   # datasheets, app notes, prior-art measurements
+│   ├── references/                   # datasheets/app notes (PDFs gitignored) + tracked references.md index & distilled notes
 │   ├── kicad/                        # KiCad project for this board; structures land here as footprints
 │   ├── structures/
 │   │   ├── <structure>/              # one self-contained design loop (e.g. patch-element, prelna-bpf)
@@ -126,6 +159,11 @@ openEMS/
 raw/
 plots/
 models/
+
+# Vendor datasheet / app-note PDFs — kept locally per board, never committed (large,
+# binary, undiffable, often redistribution-restricted). The distilled numbers live in
+# the tracked references.md index and per-part notes files; see the references/ template.
+**/references/*.pdf
 ````
 
 ### `view-model` (workspace-root scaffold)
@@ -281,6 +319,49 @@ Reference structure used to validate the simulation setup against a known answer
 - Agreement: <pass / fail, notes>
 
 Re-run when: OpenEMS / CSXCAD version changes, mesh strategy changes, stackup changes.
+````
+
+### `references/` — datasheets and distilled notes
+
+Board-level. Holds the vendor PDFs (datasheets, app notes, prior-art measurements)
+**kept locally and gitignored** (`**/references/*.pdf`) — they are large, binary,
+undiffable, and often redistribution-restricted. What is **committed** is the distilled
+value: a `references.md` index plus any per-part notes files. The discipline is *distill,
+don't hoard* — the durable artifact is the number you extracted and where it came from,
+not the PDF. A reviewer (or a future context window) reads `references.md`, not 2 MB of
+datasheet.
+
+`references.md` carries one entry per source: the local PDF filename, its
+**version / revision**, the **source URL** (so it can be re-pulled — datasheets get
+silently revised), and a **"Used for:"** line naming the exact numbers this design took
+from it (pinout, bias scheme, a P1dB, a land pattern, an LO-drive budget). Record
+deliberate **"NOT pulled — why"** skips too: that an app note was judged assembly-house
+input and not layout-gating is itself a decision worth keeping. A selection record or a
+distilled footprint/bias note that outgrows an index entry becomes its own tracked notes
+file (e.g. `lo-driver-selection.md`, `lna-placement-notes.md`), linked from the index.
+
+````markdown
+# References used — <board>
+
+Vendor PDFs are kept in this directory locally but are **git-ignored** (see
+`.gitignore`: `**/references/*.pdf`). The distilled numbers live in the notes files
+below and in the design records.
+
+## Active parts
+
+### <Vendor> <Part> — <one-line role> (committed | candidate)
+- **Datasheet** — `<filename>.pdf` (rev/ver, date).
+  Source: <product-page URL>  (PDF mirror: <URL if used>)
+  Used for: <the exact figures this design took — pinout, package, bias rails,
+  P1dB/Psat/NF, **recommended reference layout (eval-board / app-note land pattern + bias network — rule 17)**, drive budget …>.
+- **<App note N> — <title>** — `<filename>.pdf` (rev, date).
+  Source: <URL>
+  Used for: <what it gates — e.g. bias resistor value, land pattern>.
+- **<App note M> — <title>** — NOT pulled (<why — e.g. assembly-house input, not layout-gating>).
+
+## Notes files (tracked)
+- `<part>-placement-notes.md` — distilled footprint / paddle grounding / bias spec.
+- `<x>-selection.md` — component-selection record (candidate table, pick rationale).
 ````
 
 ### `sim/params.yaml`
@@ -605,11 +686,14 @@ fit one of those patterns, add it to this section before introducing it.
 12. **No decorative formatting in templates.** Tables and plain prose. These files are read by future engineers (and future LLM context windows); make them scannable.
 13. **Cast numpy scalars to Python types before `json.dump`.** Python 3.13's json rejects `numpy.bool_` and `numpy.float64`. Always wrap with `bool(...)` / `float(...)` at the JSON boundary. Symptom of forgetting: `TypeError: Object of type bool is not JSON serializable` at the very end of an otherwise-successful run.
 14. **Each iteration markdown includes a "Diff vs iter-<parent>" table** when the parent exists, generated from `history.json`. Skip the section in iter-001 (no parent). Makes the iteration log readable months later.
-15. **Use the μ-factor (Edwards–Sinsky) as the primary stability metric.** Rollett k is a secondary cross-check restricted to frequencies where `|S21| > −20 dB`. See "Sign conventions" above.
+15. **Use the μ-factor (Edwards–Sinsky) as the primary stability metric — computed and plotted wide-band.** For every active part, compute μ(f) from the vendor S-parameter file across a wide band (DC → f_max, out-of-band included — that is where devices actually oscillate) and **plot it** (μ(f) as a `derived` spectrum) as an early screen *before* committing the part's copper, then re-check μ in-fixture at bias in the Mode-C cascade. Rollett k is a secondary cross-check restricted to frequencies where `|S21| > −20 dB`. See Mode C and "Sign conventions" above.
+16. **References are distilled, not hoarded.** Vendor PDFs in `<board>/references/` are gitignored (`**/references/*.pdf`); what's committed is the tracked `references.md` index (filename + rev + source URL + "Used for:" per source, plus "NOT pulled — why" skips) and any per-part notes files. The durable artifact is the extracted number and its provenance, not the PDF. See the `references/` template.
+17. **Always retrieve and reproduce the vendor's recommended layout for every active part (added 2026-06-23).** Pull the manufacturer's reference layout for each active device — evaluation-board layout, app-note land pattern, paddle/ground and bias guidance — into `references/`, and **instantiate it** (land pattern, paddle via array, RF-pin launch, bias network, decoupling) rather than deriving the copper around the part from first principles. The datasheet's NF / gain / stability were characterised *in that layout*, so reproducing it is how those numbers transfer — and the bias network it specifies is the main defence against the low-frequency oscillation the datasheet itself cannot cover. Worked example: the CMD319C3 LNA's gate-bias resistor + ferrite + decoupling per Qorvo **AN-103**. Cite it in `references.md` under "Used for:"; a part whose reference layout is deliberately *not* followed is a flagged deviation with a recorded reason.
 
 ## First actions when invoked
 
 1. **New board:** if the workspace repo doesn't exist, `git init` it (separate from any software repo) and set up the shared `.venv/` + `openEMS/` per README. Create the workspace-root scaffold — `.gitignore`, `README.md`, and the `view-model` launcher (`chmod +x`) — once for the workspace. Create the board subdirectory and write its `goals.md` with the user before any layout — function, signal chain, board-wide constraints, and the list of structures to design. Push back on non-measurable criteria. Refuse to start any structure's loop until every one of its criteria is tagged `[sim] / [bench] / [ext]`. Commit the board scaffold (`<board>/goals.md`, `stackup.md`, `tooling.md`; workspace `.gitignore`, `view-model`).
-2. **Existing board / structure:** check the structure's `sim/params.yaml` is consistent with its `goals.md` and that the criteria-tagging is current. `git tag --list '<board>/<structure>/*'` lists that structure's iterations; its `history.json` is the numeric history.
-3. **"Start a new iteration":** the working set in `<board>/structures/<structure>/sim/` is already the parent's state (it mutates in place). Edit `sim/params.yaml` — bump `iteration`, set `parent`, write the hypothesis and `changes_from_parent`, apply the geometry change — then **stop before running** so the user (or agent) can confirm the hypothesis is worth running. Do not commit yet; uncommitted changes are trivially reverted if the hypothesis is rejected. After the run, log the results, append to the structure's `history.json`, write `iterations/iter-NNN.md`, then commit and `git tag <board>/<structure>/iter-NNN`.
-4. **"Present the design":** read every structure's `iterations/*.md` and `history.json` and synthesize `final/summary.md` from what's recorded. Tag the design source `final`. Do not invent narrative — use the iteration log as the source of truth.
+2. **Resuming a board (any phase):** the board's RECORDED state is authoritative, not the resumer's reading of the request. Re-derive the current phase from three places before doing anything: the status blocks in the board's `goals.md` (e.g. the pre-layout checklist), the most recent `board(<board>):` commits, and any work `goals.md` explicitly queues ("at the next generator pass"). That named pending work is the default next action. **Opening a NEW phase — schematic/netlist integration, the Mode-B docket, fab export — is a user decision; confirm it explicitly before starting it or briefing an agent with it.** A phrase in the user's greeting is not a phase change (real instance 2026-06-12: "doing the kicad schematics" meant the board-generator loop, not eeschema capture — a whole schematic phase was started prematurely). State the phase you believe you are in as part of picking up; if the user's words and the recorded state disagree, ask one direct question first.
+3. **Existing board / structure:** check the structure's `sim/params.yaml` is consistent with its `goals.md` and that the criteria-tagging is current. `git tag --list '<board>/<structure>/*'` lists that structure's iterations; its `history.json` is the numeric history.
+4. **"Start a new iteration":** the working set in `<board>/structures/<structure>/sim/` is already the parent's state (it mutates in place). Edit `sim/params.yaml` — bump `iteration`, set `parent`, write the hypothesis and `changes_from_parent`, apply the geometry change — then **stop before running** so the user (or agent) can confirm the hypothesis is worth running. Do not commit yet; uncommitted changes are trivially reverted if the hypothesis is rejected. After the run, log the results, append to the structure's `history.json`, write `iterations/iter-NNN.md`, then commit and `git tag <board>/<structure>/iter-NNN`.
+5. **"Present the design":** read every structure's `iterations/*.md` and `history.json` and synthesize `final/summary.md` from what's recorded. Tag the design source `final`. Do not invent narrative — use the iteration log as the source of truth.

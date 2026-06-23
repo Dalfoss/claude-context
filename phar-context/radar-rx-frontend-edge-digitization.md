@@ -1,8 +1,49 @@
 # FMCW MIMO Radar — System Architecture
 
 **Band:** 10.0 – 10.5 GHz  
-**Architecture:** FDMA/CDM · Analogue Dechirp · RF/Digitizer Board Split (SMA) · Fibre Transport  
-**Version:** 0.6 · June 2026
+**Architecture:** FDMA · Analogue Dechirp · RF/Digitizer Board Split · Fibre Transport  
+**Version:** 0.8 · 2026-06-23 (IQ-mixer / 16-channel reconciliation)
+
+> **Reconciliation note (2026-06-23) — DECHIRP MIXER → IQ, DIGITIZER 8→16 CHANNELS.** The dechirp
+> mixer changed to the **Qorvo CMD258C4 I/Q mixer**, run as a **complex-IQ downconverter** (each RX
+> channel emits I = IF1 + Q = IF2). Consequences are authoritative in `radar-project.md` → *Dechirp
+> mixer → IQ mixer; digitizer 8 → 16 channels*:
+> - **8 RX → 16 IF lines (8 I/Q pairs); digitizer = 16 ADC channels** (2× octal serial-LVDS ADC, or
+>   the **OHWR FMC ADC 100M 14b 16cha** card — 16 ch = 8 I/Q pairs).
+> - **IF egress: the 8-coax 8W8 D-sub is superseded → 16 coax** (connector class TBD).
+> - **I/Q is now ANALOG** (from the mixer), not generated digitally: the DDC processes a **complex**
+>   input; image rejection = analog I/Q balance (~29 dB) + digital correction; the composite-channel
+>   cal extends to **per-channel I/Q gain/phase imbalance**. **DDC channel count (56) and the decimated
+>   payload / 1G–2.5GbE budget are unchanged.**
+> - **LO drive +21 dBm/port nominal**; **LO-IF isolation 15 dB min** (worse → more LO leakage per IF
+>   pin; if-termination now on both IF pins).
+>
+> Sections below that still say "single IF / octal ADC / 8 channels / digital-IQ-via-CORDIC / 8W8"
+> predate this; where they conflict, this note and `radar-project.md` are authoritative.
+
+> **Reconciliation note (2026-06-16).** This document predated several firmed system decisions
+> now recorded in the PCB workspace's **`radar-project.md`** (the project-level architecture of
+> record). It has been updated to match them; where any older passage still conflicts,
+> **`radar-project.md` is authoritative.** Superseding decisions folded in here:
+> - **Digitizer FPGA is a bought SoM, not a direct BGA:** Trenz **TE0712** (Artix-7 **XC7A200T**)
+>   on a carrier via Samtec **LSHM** board-to-board — no FMC, no BGA escape, no ScopeFun power
+>   tree (the SoM owns DDR3 / config flash / power sequencing). This **reopens the open-source
+>   toolchain constraint** (openXC7/nextpnr-xilinx on A200T is unverified; the TE0712 vendor flow
+>   is Vivado) — see §4.6.
+> - **ADC baseline is octal serial-LVDS** (AD9681 lean; LTC2145-14 dual-parallel kept as the
+>   characterized alternative) — pin count is what makes the SoM B2B close (§4.5).
+> - **No 10GbE.** Edge-decimate harder (~0.8–1 MHz subbands) → ~1.4–1.8 Gbps/board → **1G/2.5GbE
+>   over SFP, GTP-as-PHY** (no Ethernet chip), aggregated by a **switch** to a 100G-class uplink —
+>   not point-to-point to a NIC. 10.3125 Gbd is in-band for the 10 GHz aperture (§2.3, §4.6, §7.2).
+> - **Clock backbone:** distribute a **low (~10 MHz) master reference** + phase-matched fan-out +
+>   a **per-board jitter-cleaning PLL / network-synchronizer** → local 125 MHz, plus **SYSREF and
+>   a ramp-start strobe**. Replaces "100 MHz OCXO on a passive splitter + one-time startup-tone
+>   phase cal." See `clock_distribution_architecture.md` and §2.4 / §7.1.
+> - **RF board is passive at 10 GHz** (no on-board PA), fed **~+30–31 dBm** LO at one SMA and split
+>   1:8 on-board; LO amplification lives on the distribution bricks. The exciter is **three boards**
+>   (Synthesizer → BPF → PA+Mixer), not one "TX board" (§6).
+> - **RX→digitizer egress is a corner 8W8 combination-D-sub bulkhead** (8× shielded coax + a
+>   filtered bias/control entry), not 8 loose edge-launch SMAs (§3.3, §4.7).
 
 ---
 
@@ -46,9 +87,11 @@ This document describes the hardware and signal-chain architecture for a softwar
 | Range resolution | ≈ 1.5 m at 100 MHz total BW via joint processing |
 | Max target range | ~1.5 km (v1 prototype goal, not the end goal; scales with channel count — see §8) |
 | TX channels | 8 (initial) |
-| RX channels per board | 8 |
-| Stage 1 ADC | 14-bit, 125 MSPS → ~12.0 ENOB |
+| RX channels per board | 8 (each → I/Q → **16 IF / 16 ADC ch**, 2026-06-23 IQ mixer) |
+| Stage 1 ADC | 14-bit, 125 MSPS, serial-LVDS — **16 channels (8 I/Q pairs)**: 2× octal AD9681 or OHWR FMC-16cha (2026-06-23 IQ mixer) → ~12.0 ENOB |
 | Stage 2 ADC | 16-bit, 250 MSPS + DDC → ~13.8–14.3 ENOB |
+| Digitizer FPGA | Trenz **TE0712** SoM (Artix-7 **XC7A200T**) on a carrier via Samtec LSHM B2B (no FMC) |
+| Backhaul | **1G/2.5GbE over SFP** (GTP-as-PHY, no 10GbE) → switch → 100G-class uplink |
 | RF substrate | Rogers 4003C, 0.508 mm core |
 
 ---
@@ -73,11 +116,30 @@ All heavy processing (Hilbert transform, decimation, FFTs, beamforming) runs on 
 32 boards × 8 channels × 14 bits × 125 MSPS = 448 Gbps raw
 ```
 
-No central FPGA handles this. Decimation and Hilbert must live at the edge — they are the bandwidth reduction step. After edge processing, data rates are tractable for a standard 10G NIC into a GPU workstation.
+No central FPGA handles this. DDC + decimation must live at the edge — they are the bandwidth-reduction step. After edge processing each board emits ~1.4–1.8 Gbps, which crosses a **standard 1G/2.5GbE link over SFP** (no 10GbE — see §4.6); a **commodity switch** aggregates the N boards into a single 100G-class uplink to the GPU workstation (switchable fabric, not point-to-point links — `radar-project.md` expansion rule #1).
 
 ### 2.4 ADC Phase Coherence
 
-Coherence is achieved by: (1) a shared OCXO master clock distributed to every Digitizer Board, eliminating frequency variation while leaving a fixed power-up phase offset per board; and (2) startup calibration — the central processor injects a known tone, each Digitizer Board measures its per-channel phase offset, and fixed correction coefficients are stored in firmware. With the two-board split (§2.5), the SMA-coax run between the RF Board and Digitizer Board adds a fixed per-channel delay; this is absorbed into the same startup-tone calibration provided the eight beat cables are length-matched to within the per-channel phase budget.
+*(Reconciled 2026-06-16 — the earlier "fixed power-up offset absorbed by a one-time startup tone" model was too simple; full treatment in `clock_distribution_architecture.md` and `radar-project.md`.)*
+
+Coherence is built in layers, each removing one disagreement:
+
+1. **Shared low reference + per-board PLL.** A **low (~10 MHz) master reference** is fanned out
+   phase-matched to every Digitizer Board; each board's **jitter-cleaning PLL / network-synchronizer**
+   locks to it and multiplies up to the local 125 MHz ADC clock. Locking kills the inter-board
+   **sample-RATE (ppm)** error — the term that actually breaks combining N boards (a free-running
+   "set them all to 125 MHz" does not).
+2. **Divider phase — SYSREF vs cal (open).** When each PLL divides down to 125 MHz the divider can
+   power up in a different phase **each boot**, so two locked boards can sit ~1 sample period apart
+   until that is resolved. A **SYSREF**-capable clock IC pins it deterministically; without SYSREF it
+   re-randomises every power cycle and must be re-measured by calibration on each boot. **Which way to
+   go is an open clock-IC decision** (`radar-project.md` → *The two clock-IC classes*).
+3. **Ramp-start strobe** anchors the per-carrier NCO phase to a consistent ramp instant — the φ₀
+   anchor the synthetic-wideband (FDMA) combine needs (§5; `clock_distribution_architecture.md` §5).
+4. **Calibration of the residual.** Static terms — the inter-board cable delays, the SMA/D-sub egress
+   run, ADC gain/timing spread — fold into a **composite-channel calibration** (keyed to the RF-board
+   ⊕ digitizer ⊕ harness tuple), seeded on the bench and refined **over-the-air at join**, not a single
+   startup tone. There are **no on-board cal-injection couplers** (adding them later is a respin).
 
 ### 2.5 Board Split — Digitise on a Separate FR4 Board
 
@@ -85,13 +147,13 @@ Earlier revisions placed the antennas, RF chain, ADC array, and an FPGA mezzanin
 
 The settled design splits the front-end into two boards joined by SMA coax:
 
-- **RF Board** (Rogers 4003C, 4-layer) — antennas + full analogue receive chain through the dechirp mixer. Outputs one beat signal per channel as a baseband (≤~60 MHz) analogue signal over SMA. Pure RF/analogue; no ADCs, no FPGA, no BGA, no LVDS.
-- **Digitizer Board** (FR4, multilayer) — 8× SMA beat inputs, anti-alias LPFs, ADC array, ECP5 FPGA, SFP+ output, ADC SPI, and power. All LVDS runs between the ADCs and the FPGA are on this one board, so trace-length matching, impedance, and stackup are fully controlled — a solved PCB-layout problem with no inter-board interface uncertainty.
+- **RF Board** (Rogers 4003C, 4-layer) — antennas + full analogue receive chain through the dechirp mixer. Outputs one beat signal per channel as a baseband (≤~60 MHz) analogue signal, egressing through a **corner 8W8 combination-D-sub bulkhead** (8× shielded coax contacts + a filtered bias/control entry). Pure RF/analogue; no ADCs, no FPGA, no BGA, no LVDS.
+- **Digitizer Board** (FR4, multilayer) — octal beat inputs, anti-alias LPFs, octal serial-LVDS ADC, **Trenz TE0712 SoM (Artix-7 XC7A200T) on a carrier via Samtec LSHM B2B (no FMC)**, SFP output (1G/2.5GbE), ADC SPI, clock IC, and power. All LVDS runs between the ADCs and the SoM are on this one board, so trace-length matching, impedance, and stackup are fully controlled — a solved PCB-layout problem with no inter-board interface uncertainty.
 
 **Why this is the right call:**
 
-- The inter-board interface is a ~62.5 MHz baseband signal over 50 Ω SMA coax — completely standard, low-risk, any cable length. No connector compromises, no inter-board LVDS, no PMODs.
-- The Rogers RF Board stays a clean 4-layer board; the ECP5 BGA escapes normally on standard multilayer FR4. The mezzanine module (DF40 connectors, separate FR4 sub-module) is eliminated entirely.
+- The inter-board interface is a ~62.5 MHz baseband signal over 50 Ω shielded coax (8W8 D-sub) — completely standard, low-risk, any cable length. No high-speed inter-board LVDS, no PMODs.
+- The Rogers RF Board stays a clean 4-layer board. **The SoM removes the BGA-escape problem entirely** — the A200T BGA, its DDR3, config flash, and the strict 7-series power sequencing all live on the bought module; the carrier only routes the LSHM B2B, the ADC LVDS, the SFP pair, and power. (The earlier direct-ECP5/A100T-BGA + ScopeFun-power-tree plan is retired — see §4.6.)
 - Each board is fabbed where it is natural and cheap: Rogers at Würth, FR4 at JLCPCB Advanced.
 - RF bring-up and digital bring-up proceed fully independently; risk is isolated.
 - A Stage 2 ADC upgrade (§10) respins **only** the Digitizer Board — the RF Board is ADC-agnostic.
@@ -103,23 +165,26 @@ The settled design splits the front-end into two boards joined by SMA coax:
 ### 3.1 Signal Flow
 
 ```
-OCXO (100 MHz) ──┬── Chirp generator ── TX board ── TX antennas
-                 │
-                 ├── Reference chirp ── RF Board LO SMA (see note)
-                 │
-                 └── Master clock ── Digitizer Board ADC clock input
+Exciter chain (Synthesizer → BPF → PA+Mixer, §6):
+  ~10 MHz master ref ──┬── chirp DDS/DAC + FDMA carriers ── BPF (subband plan) ── PA+Mixer
+                       │                                                            ├── TX antenna
+                       │                                                            └── reference chirp (LO)
+                       ├── phase-matched fan-out: ref clock + SYSREF + ramp strobe ──► every Digitizer Board
+                       └── (ref chirp distributed via cascadable 1:8 fan-out bricks, per-tier re-amplified)
 
-RF Board (per channel):
-  [Patch] → [BPF] → [Limiter] → [LNA] → [BPF] → [Dechirp mixer] → [IF term.] → SMA out
+RF Board (per channel), passive at 10 GHz:
+  [Patch] → [BPF] → [Limiter] → [LNA] → [BPF] → [Dechirp mixer] → [IF term.] → 8W8 D-sub bulkhead
                                                        ↑
-                                                ref chirp (LO)
+                                          ref chirp (LO, ~+30 dBm at SMA → 1:8 Wilkinson on-board)
                                                                           │ beat signal
-                                                                          │ (≤~60 MHz)
-                                                                          ▼ SMA coax
+                                                                          │ (≤~60 MHz, shielded coax)
+                                                                          ▼
 Digitizer Board (per channel):
-  SMA in → [Anti-alias LPF] → [balun] → [ADC] → [FPGA: Hilbert + Decimate] → [SerDes]
-                                                                                  │
-                                                                    Fibre → GPU workstation
+  coax in → [Anti-alias LPF] → [balun] → [octal serial-LVDS ADC] → [SoM/FPGA: DDC (NCO+CIC) + decimate]
+                                              ▲                                       │
+                       local jitter-cleaning PLL/clock IC ── 125 MHz, SYSREF          ▼ GTP → SFP (1G/2.5GbE)
+                       (locked to the ~10 MHz ref; ramp strobe → NCO reset)           │
+                                                                       switch (aggregate) → 100G uplink → GPU
 ```
 
 The anti-alias LPF sits on the Digitizer Board immediately ahead of the ADC, not at the mixer — see §4.3.6. The mixer IF port is terminated locally on the RF Board (`IF term.`); the termination scheme is an open decision (pad vs. diplexer, §4.3.6, §12).
@@ -132,12 +197,12 @@ The reference chirp is a copy of the transmitted chirp at 10.0–10.5 GHz. When 
 
 | Interface | Signal | Direction | Connector |
 |---|---|---|---|
-| Reference chirp LO | 10.0–10.5 GHz; +15 dBm (MAMX-011035) or 0 dBm (LTC5548) | TX → RF Board | SMA edge-launch |
-| Beat signal (×8) | Baseband ≤~60 MHz analogue, 50 Ω | RF Board → Digitizer Board | SMA + coax |
-| ADC master clock | 100 MHz OCXO-derived | Central → Digitizer Board | SMA |
-| Fibre data link | Decimated complex IQ | Digitizer Board → Central | SFP+ cage |
-| DC power (RF Board) | 3.3 V | PSU → RF Board | Molex or header |
-| DC power (Digitizer Board) | 1.1 V / 1.8 V / 1.8 V / 3.3 V | PSU → Digitizer Board | Molex or header |
+| Reference chirp LO | 10.0–10.5 GHz; **~+30–31 dBm** at the board SMA (passive 1:8 Wilkinson on-board → ~+19 dBm/mixer) | PA+Mixer / fan-out brick → RF Board | SMA edge-launch |
+| Beat signals (×8) | Baseband ≤~60 MHz analogue, 50 Ω, per-channel shielded | RF Board → Digitizer Board | **8W8 combination D-sub** (8× coax contacts) |
+| Timing harness | **~10 MHz master ref + SYSREF + ramp-start strobe** | Synth → Digitizer Board | coax / harness (travelling together) |
+| Backhaul data link | Decimated complex IQ, **1G/2.5GbE** | Digitizer Board → switch | SFP cage (GTP-as-PHY) |
+| DC power (RF Board) | bias rails (LNA LDO, etc.) | PSU → RF Board (filtered bias entry) | D-sub bias contacts / header |
+| DC power (Digitizer Board) | SoM-defined rails + ADC/clock analog rails (TBD at carrier design) | PSU → Digitizer Board | Molex or header |
 
 ---
 
@@ -146,7 +211,7 @@ The reference chirp is a copy of the transmitted chirp at 10.0–10.5 GHz. When 
 The front-end is two boards joined by SMA coax (§2.5):
 
 - **RF Board** (Rogers 4003C, 4-layer) — 8 RX antenna elements and the full analogue receive chain through the dechirp mixer and IF termination. Covered by §4.1–§4.3.
-- **Digitizer Board** (FR4, multilayer) — anti-alias filtering, ADC array, ECP5 FPGA, fibre output, and power. Covered by §4.4–§4.6.
+- **Digitizer Board** (FR4, multilayer) — anti-alias filtering, octal serial-LVDS ADC array, Trenz TE0712 SoM (A200T), SFP fibre output, and power. Covered by §4.4–§4.6.
 
 Section §4.7 gives the physical layout of both boards.
 
@@ -278,6 +343,12 @@ A 1.3 dB system NF increase reduces maximum detection range by roughly 15–20% 
 
 #### 4.3.5 Dechirp Mixer
 
+> **SUPERSEDED 2026-06-23 — the primary is now the Qorvo CMD258C4 I/Q mixer** (7.5–13 GHz, Ceramic QFN
+> 4×4 mm 24-lead), run as a **complex-IQ downconverter**: each channel emits I (IF1) + Q (IF2), doubling
+> to 16 IF / 16 ADC channels; image rejection is digital (analog I/Q balance ~29 dB + per-channel cal).
+> LO drive +21 dBm/port nominal; LO-IF isolation 15 dB min. See `radar-project.md` → *Dechirp mixer → IQ
+> mixer*. The CMD253C3 below is retained as the single-real-IF lineage.
+
 A passive GaAs mixer is used. RF port receives the filtered signal; LO port receives the pre-amplified reference chirp; IF output is the beat signal.
 
 **Primary choice — Qorvo CMD253C3**
@@ -381,7 +452,7 @@ Each beat signal arrives at the Digitizer Board on its own SMA. The per-channel 
 SMA in → [anti-alias LPF] → [balun / single-ended drive] → ADC
 ```
 
-- **Anti-alias LPF** — relocated here from the RF Board (§4.3.6). Mini-Circuits LFCN-80+ (DC–80 MHz, SMD) for the LTC2145-14 at 125 MSPS; ~55–60 MHz effective anti-alias cutoff. Swapped as a matched pair with the ADC at Stage 2 — same footprint.
+- **Anti-alias LPF** — relocated here from the RF Board (§4.3.6). **General rule: the AA-LPF is tailored to whatever ADC the Digitizer Board carries — its corner tracks the chosen ADC's Nyquist (a matched pair), never a fixed number.** Set the passband to the maximum beat frequency of interest, place the stopband to reject everything above the ADC's Nyquist (fs/2) before it samples, and pick fs so fs/2 clears the max beat with ~20–25 % margin. For any 125 MSPS Stage-1 candidate (LTC2145-14 *or* the octal-serial AD9681, §4.5) the corner is ~55–60 MHz → Mini-Circuits LFCN-80+ (DC–80 MHz, SMD). Re-derive and swap the LFCN value as a matched pair with the ADC whenever the sample rate changes (e.g. Stage 2) — same footprint.
 - **Balun / single-ended drive** — converts the single-ended beat signal to the ADC differential input. The MAMX-011035 IF is DC-coupled and the beat band reaches near-DC, so preserve the DC path (or apply the defined DC bias the LTC2145-14 input common-mode spec requires) rather than AC-coupling.
 - **Grounding note** — each coax shield ties the RF Board and Digitizer Board grounds together (×8 paths). This is generally desirable (shared reference), but with a DC-coupled IF, watch board-to-board ground-potential offset in the power/grounding scheme.
 
@@ -392,6 +463,8 @@ SMA in → [anti-alias LPF] → [balun / single-ended drive] → ADC
 All 14-bit pipeline ADCs at 100–125 MSPS cluster around 73–75 dBFS SNR — this is a physics constraint on the technology tier, not a design differentiator. The key discriminators are SFDR, power consumption, and upgrade path.
 
 For our DC to 40 MHz beat signal, ENOB is SNR-limited at approximately 12.0 bits. SFDR is not the binding ENOB constraint at these frequencies, but better SFDR reduces ADC harmonic spurs that appear as false targets.
+
+> **Co-candidate added 2026-06-16 — octal-serial AD9681.** The current digitizer plan (no-FMC FPGA-SoM carrier, `radar-project.md`) prefers an **octal serial-LVDS** ADC over the dual parallel-DDR LTC2145-14 on **pin count**: octal-serial lands ~18–20 LVDS pairs for 8 channels vs the LTC2145's 128 parallel data pins (§4.5.4), which is what lets the ADC→FPGA fabric fit the Samtec LSHM board-to-board budget. The **AD9681** (octal, 14-bit, 125 MSPS, ~85 dBc SFDR) is the lean candidate — same SNR tier as LTC2145-14; it takes the Stage-2 serial interface (§10.4) at Stage 1 without the 16-bit/250 MSPS/DDC jump. Settle AD9681 vs LTC2145-14 side by side once the LSHM pin/bank map is in hand; the discriminator is interface/pin-count, not ENOB (a wash). The LTC2145-14 detail below remains the parallel-interface baseline.
 
 #### 4.5.2 Stage 1 Part: ADI LTC2145IUP-14#PBF
 
@@ -454,103 +527,107 @@ The FPGA captures both channels using DDR input registers; FCO identifies which 
 
 ### 4.6 Digitizer Board — FPGA
 
-#### 4.6.1 Selected Part: XC7A100T (Xilinx Artix-7 100T)
+#### 4.6.1 Selected Part: Trenz TE0712 SoM (Artix-7 XC7A200T)
+
+The digitizer FPGA is now a **bought SoM**, not a direct BGA: the **Trenz TE0712** (Artix-7 **XC7A200T**, 1 GB DDR3, 32 MB config flash) on the carrier via **Samtec Razor Beam LSHM** board-to-board (0.50 mm) — **no FMC, no BGA escape**. The carrier routes only the LSHM B2B, the ADC serial-LVDS, the SFP pair, the clock IC, and power; the SoM owns the BGA, DDR3, config, and the strict 7-series power sequencing.
 
 | Parameter | Value |
 |---|---|
-| Logic cells | ~101,000 |
-| DSP slices | **240** (DSP48E1) |
-| Block RAM | 4,860 Kbits |
-| GTP transceivers | 4 lanes at up to **6.6 Gbps** each |
-| User I/O (FBG484) | up to ~300 signal pins |
-| Toolchain | **openXC7** (Yosys + nextpnr-xilinx) — 100% open-source |
-| Package | FBG484 (required for GTP transceiver access) |
-| Price | ~$80–150 (check Digikey/Mouser at time of order) |
+| Module | Trenz **TE0712** |
+| FPGA | Artix-7 **XC7A200T** |
+| DSP slices | **740** (DSP48E1) |
+| GTP transceivers | 4 lanes ≤ **6.6 Gbps** (used for 1G/2.5GbE only — §4.6.5) |
+| Carrier mount | Samtec **LSHM** B2B — JM1/JM2 = 2×100-pin (ADC LVDS), JM3 = 60-pin (4 GTP + 125 MHz MGT refclk → SFP) |
+| On-module | 1 GB DDR3, 32 MB config flash, power sequencing |
+| Toolchain | **OPEN** — TE0712 vendor flow is Vivado; openXC7/nextpnr-xilinx A200T support unverified (below) |
 
-**Why Artix-7 over ECP5-85F:**
+**Why a SoM (vs the earlier direct-BGA A100T / ECP5 plan).** Two things changed: (1) decimating to ~0.8–1 MHz subbands drops the per-board link to ~1.4–1.8 Gbps (§4.6.2), so the SerDes ceiling that drove "A100T-GTP over ECP5" is no longer the constraint — **the A200T is chosen for its 740 DSP48 (vs 240 on A100T)** to hold 56 streaming DDC channels comfortably, not for transceiver speed. (2) Buying the SoM **removes the 200k-BGA escape, DDR3 layout, and 7-series power-tree risk** from the board entirely — the dominant Stage-1 digital risk in the old plan.
 
-The ECP5-85F SerDes tops out at **5.0 Gbps per lane**. Streaming all 64 DDC channels at the target subband rates produces ~4.1–6.1 Gbps aggregate (see §4.6.2), which presses against or exceeds the ECP5 ceiling — forcing either aggressive clock margining or reduced subband bandwidth. The XC7A100T's GTP transceivers run natively at **up to 6.6 Gbps**, providing clean headroom on a single lane without overclocking. Additionally, the 240 DSP48E1 slices (vs 156 ECP5 DSP blocks) handle the 64-channel CORDIC DDC matrix more comfortably.
-
-**Toolchain: openXC7.** Yosys + nextpnr-xilinx synthesises and places Artix-7 (7-series) designs fully open-source, fulfilling the rigid open-source toolchain constraint. openXC7 has demonstrated working hardware implementations on XC7A100T.
+> **Open — open-source toolchain constraint.** The earlier plan picked the A100T partly for **openXC7** (Yosys + nextpnr-xilinx, "100% open-source"). The TE0712 ships with a **Vivado** flow, and openXC7/nextpnr-xilinx support for the **A200T** is unverified. If the open-source toolchain is still a hard requirement, confirm A200T coverage (or reconsider the SoM/part); otherwise this is a deliberate relaxation to Vivado. Flagged for the user.
 
 **FPGA tasks on the Digitizer Board:**
 
 | Task | Implementation |
 |---|---|
-| ADC LVDS DDR capture | IDDR primitives on differential I/O; DCO as capture clock; FCO for channel de-interleaving |
-| DDC per channel (×64) | CORDIC complex mixer → CIC decimation filter; 8 DDC instances per physical ADC channel |
-| Byte-interleaving packer | Lines up IQ samples from all 64 DDC channels into structured data frames; no FPGA-side FFT |
+| ADC serial-LVDS capture | ISERDES + IDELAYE2 (+ IDELAYCTRL) deserialize the octal serial-LVDS; per-board eye alignment (local, downstream of the aligned sample instant — does not affect cross-board coherence) |
+| DDC per subband (×56) | complex NCO mixer → CIC decimation → comp/cleanup FIR; **7 subbands per physical ADC channel × 8 = 56** |
+| Strobe → NCO reset | ramp-start strobe (LVDS → synchronizer → edge detect) reloads all NCO phase accumulators on a common edge; sample-counter timestamp into the stream |
+| Byte-interleaving packer | Lines up IQ samples from all 56 DDC channels into structured data frames; no FPGA-side FFT |
 | ADC SPI configuration | One-time startup |
 | Data framing | Frame DDC IQ samples with channel ID, subband ID, and timestamp |
-| GTP TX | Native 10G-class SFP+ output at up to 6.6 Gbps; one fiber per board |
+| GTP TX | 1G/2.5GbE over SFP (GTP-as-PHY, no Ethernet chip); one fiber per board |
 
 #### 4.6.2 DSP Architecture — Frequency-Selective Decimation
 
-Each of the 8 physical ADC channels feeds a parallel bank of 8 DDC (Digital Down-Converter) channels, giving **64 DDC channels total**. Each DDC:
+Each of the 8 physical ADC channels feeds a bank of **7 DDC (Digital Down-Converter) channels — one per FDMA subband — giving 56 DDC channels total** (the 7 subbands are 7 frequency-diverse looks at the same range slice, not range gates). Each DDC:
 
-1. Applies a CORDIC-based complex mixer to translate the assigned 2–3 MHz subband to baseband
-2. Follows with a CIC decimation filter to isolate the subband and drop the sample rate
+1. Applies a **complex NCO mixer** to translate its assigned subband to baseband (full-rate stage)
+2. Follows with a **CIC decimator + droop-comp FIR + cleanup/halfband FIR** to isolate the subband and drop the rate (≈÷125 → ~1 MSPS complex; the comp/cleanup FIR — not the CIC — delivers the 70–80 dB inter-carrier stopband)
 3. Produces complex (I+Q) baseband samples at the decimated output rate
 
-**No FPGA-side FFT.** Instead of up-converting and stitching subbands into a spectrum on the FPGA, a parallel-to-serial **byte-interleaving packer** lines up the raw time-domain IQ samples from all 64 DDC channels back-to-back into structured data frames and streams them raw. The host workstation's AMD CPU unpacks and computes FFTs in software. This eliminates a significant FPGA firmware complexity and reduces estimated firmware difficulty from ~8/10 to ~6/10.
+Replicate only the full-rate mixer; time-multiplex everything downstream (vendor FIR-Compiler "channels" param). Sizing is **LUT/DSP-bound** on the A200T (740 DSP, ~150 used; the CIC bank is the LUT driver), not transceiver-bound — which is why the part is chosen on DSP, not SerDes.
 
-**Data rate budget:**
+**No FPGA-side FFT.** A **byte-interleaving packer** lines up the raw time-domain IQ samples from all 56 DDC channels into structured frames and streams them raw; the host computes FFTs/beamforming in software. (An on-chip range FFT earns nothing on bandwidth here — the decimation already *is* the range gate — so it stays on the host.)
+
+**Data rate budget (the lever that kills 10GbE):**
 ```
-64 DDC channels × 2–3 MSPS (CIC decimated) × 32 bits (16-bit I + 16-bit Q)
-  Low end (2 MSPS subbands):  64 × 2e6 × 32 = 4.1 Gbps payload
-  High end (3 MSPS subbands): 64 × 3e6 × 32 = 6.1 Gbps payload
-  → Both fit within a single 6.6 Gbps GTP lane with framing overhead  ✓
-  → One SFP+ fiber per board                                           ✓
+56 DDC channels × f_out × 32 bits (16-bit I + 16-bit Q)
+  1.0 MHz subbands:   56 × 1.0e6 × 32 = 1.79 Gbps payload
+  0.8 MHz (chosen):   56 × 0.8e6 × 32 = 1.43 Gbps payload
+  → fits 2.5GbE (~2.3 Gbps net after framing) comfortably           ✓
+  → one SFP fiber per board, 1G or 2.5G                              ✓
 ```
 
-CIC decimation factor is firmware-configurable; target is the 2–3 MHz subband bandwidth set by the FDMA waveform plan.
+The 16-bit IQ width is **not** shaved for the link — it carries the ~3 ENOB of decimation processing gain (10·log₁₀(62.5/0.8) ≈ 18.9 dB); dropping bits would throw that away. The **band width** (0.8 MHz) is the chosen tuning lever instead. The old 2–3 MHz / 4–6 Gbps / 10G-class sizing is retired.
 
-#### 4.6.3 FPGA Integration: Monolithic Digitizer Board (FR4)
+#### 4.6.3 Carrier Integration: SoM + Octal ADC on One FR4 Board
 
-ADCs and FPGA share one FR4 PCB — no mezzanine connectors, no daughter cards. This was already the case with the ECP5 design (§2.5); the Artix-7 upgrade maintains it. All 100 Ω differential LVDS DDR traces between the ADCs and the FPGA are fully controlled and length-matched on-board — a solved PCB layout problem.
+The ADC array and the SoM share one FR4 carrier — no mezzanine, no daughter cards, **no FMC** (§2.5). All differential serial-LVDS traces between the octal ADC and the SoM's LSHM B2B are controlled and length-matched on-board — a solved PCB layout problem.
 
-**Reference Design: ScopeFun.** The ScopeFun open-source oscilloscope (KiCad schematic + PCB, open-source licence) targets the Artix-7 and provides a verified starting baseline for:
+**The SoM subsumes the old BGA-integration risk.** With the TE0712, the carrier no longer carries the FPGA BGA, its DDR3, the config flash, or the strict 7-series power tree (VCCINT → VCCAUX → VCCIO) — all of that is on the module and verified by Trenz. The earlier **ScopeFun** reference (used to de-risk exactly the A100T BGA power-up and LVDS routing) is therefore retired as the baseline; the relevant references are now the **Trenz TE0712 TRM + carrier reference designs** — pull the exact LSHM dash-code, the JM1/JM2/JM3 pin/bank table, and the SoM input-rail spec before footprinting.
 
-- **Artix-7 power sequencing** — the 7-series power-up sequence (VCCINT → VCCAUX → VCCIO) is critical and easy to get wrong; ScopeFun has this verified
-- **High-speed SMA input stages** — verified front-end circuitry
-- **Differential LVDS ADC routing** — confirmed trace geometry and termination
-- **GTP transceiver routing and SFP+ integration** — the ScopeFun schematic/layout is used as a starting baseline; expand to 8 ADC channels from this verified foundation
+**Carrier support circuitry (what's left to design):**
 
-**FPGA support circuitry:**
-
-| Component | Part | Cost |
+| Component | Part | Notes |
 |---|---|---|
-| FPGA | XC7A100T-FBG484 | ~$80–150 |
-| Core regulator 1.0 V | TPS62130 or ScopeFun equivalent | ~$3 |
-| I/O LDO 1.8 V | TLV75801 | ~$2 |
-| Config flash | W25Q128 | $1 |
-| Passives / decoupling | — | ~$5 |
-
-> **Power sequencing is strict.** Follow the ScopeFun power tree exactly: VCCINT (1.0 V) must ramp before VCCAUX (1.8 V); VCCIO must ramp last. Deviating from this sequence can latch-up or damage the FPGA.
+| FPGA | Trenz TE0712 SoM (A200T) | module; mounts via LSHM B2B |
+| SoM input rail | per TE0712 TRM | the module regulates its own VCCINT/VCCAUX internally |
+| ADC analog / IO rails | LDO/buck (1.8 V class) | clean, separate from the digital corner |
+| Clock IC | jitter-cleaner / network-synchronizer | own clean rail; see clock backbone (§2.4, §7.1) |
+| ADC config | SPI from the SoM | one-time startup |
+| Passives / decoupling | — | per SoM + ADC + clock |
 
 #### 4.6.4 IQ Generation via CORDIC DDC
+
+> **Updated 2026-06-23 (IQ mixer):** baseband **I/Q is now produced in ANALOG by the CMD258C4 mixer**
+> (IF1/IF2 → two ADCs per channel). The DDC's NCO/CORDIC rotation now operates on a **complex** input
+> (per-subband translation + decimation as before); it no longer manufactures I/Q from a real signal.
+> Net: DDC channel count (56) and decimated payload unchanged; the analog IQ resolves beat **sign** (no
+> negative-frequency fold) and the host adds **per-channel I/Q-imbalance correction**. See
+> `radar-project.md` → *Dechirp mixer → IQ mixer*.
 
 Each DDC channel applies a CORDIC-based complex rotation to translate its assigned subband to baseband, producing I and Q components directly. This replaces the Hilbert FIR approach used in the prior ECP5 plan. Advantages:
 
 - IQ is produced directly from CORDIC rotation — no Hilbert approximation; image rejection is limited only by CORDIC iteration depth and quantisation noise (theoretically superior to the 60 dB of a 64-tap Hilbert FIR)
 - Each DDC independently tunes to any subband via its NCO frequency word — firmware-reconfigurable without hardware changes
-- The 64 DDC channels pipeline in parallel across the DSP48E1 fabric; time-multiplexed CORDIC engines can reduce resource usage if needed
+- The 56 DDC channels pipeline across the DSP48E1 fabric (A200T = 740 DSP48, ~150 used — comfortable); time-multiplexed engines reduce resource usage further if needed
 
 The GPU workstation receives raw IQ from each DDC and applies FFT and beamforming processing entirely in software.
 
-#### 4.6.5 Fibre Output — 10G-Class UDP Ethernet
+#### 4.6.5 Fibre Output — 1G/2.5GbE over SFP (GTP-as-PHY, no 10GbE)
 
-The Artix-7 GTP transceiver drives a single SFP+ cage at up to 6.6 Gbps. At 4.1–6.1 Gbps aggregate DDC output, one GTP lane comfortably carries the full 64-channel stream over a single OM3/OM4 multimode fiber to the host workstation's 10G NIC.
+The SoM's GTP transceiver drives a single **SFP** cage at a **standards-compliant** 1000BASE-X (1.25 Gbd) or 2.5GBASE-X (3.125 Gbd) line rate — both far inside the Artix-7 GTP ≤6.6 Gbps ceiling. At ~1.43–1.79 Gbps aggregate DDC payload (§4.6.2), **2.5GbE carries the full 56-channel stream** over one fiber; prefer **1G** if the decimated data fits (fewer in-band clock sources near the analog, smaller uplink).
 
 | Parameter | Value |
 |---|---|
-| Framing | UDP/IP Ethernet |
-| Physical | GTP transceiver → SFP+ cage → multimode fiber |
-| Max GTP line rate | 6.6 Gbps |
-| Aggregate DDC payload | ~4.1–6.1 Gbps (decimation-dependent) |
-| Host interface | Standard SFP+ port on 10G NIC |
+| Framing | UDP/IP Ethernet over 1000BASE-X / 2.5GBASE-X |
+| Physical | **GTP = the PHY** → SFP cage → fiber (SFP is a dumb optical SerDes; **no Ethernet chip on the carrier**) |
+| Line rate | 1.25 Gbd (1G) or 3.125 Gbd (2.5G) |
+| Aggregate DDC payload | ~1.43–1.79 Gbps (0.8–1.0 MHz subbands) |
+| Host side | **commodity switch** aggregating N boards → 100G-class uplink to the GPU (not a per-board NIC) |
+| Extra parts | 2 diff pairs + AC caps, slow I²C/MOD control; a 156.25 MHz osc **only if 2.5G** |
 
-> **10GbE line-rate note.** Standard 10GBASE-SR uses a 10.3125 Gbps line rate. Artix-7 GTPs top out at 6.6 Gbps and cannot reach 10.3125 Gbps natively. The design runs a custom/non-standard line rate over 10G-class SFP+ hardware (fiber and transceiver tolerate it; the optical layer is passive). The host NIC must accept this custom line rate — verify host NIC and driver compatibility before committing to a specific GTP baud rate. An alternative is an external 10G MAC/PHY chip between FPGA and SFP+ cage to produce a standards-compliant 10.3125 Gbps signal, at the cost of an additional component. Confirm the approach during Digitizer Board schematic capture.
+> **Why no 10GbE (hard datapoint).** Raw 8-ch (~14 Gbps) cannot cross the GTP — but rather than chase a custom rate or an external 10G MAC/PHY, the architecture **decimates on the FPGA first** (§4.6.2) so a standard 1G/2.5GbE link suffices. Beyond cost, **10.3125 Gbd is an in-band emitter for the 10.0–10.5 GHz aperture** — a SerDes reason to keep 10G away from the RF apertures in the enclosure. Coherence does **not** ride the Ethernet (no PTP): samples align by index off the shared ramp-start strobe; the switch only aggregates bandwidth.
 
 ### 4.7 Physical Layout
 
@@ -574,31 +651,35 @@ The Artix-7 GTP transceiver drives a single SFP+ cage at up to 6.6 Gbps. At 4.1�
         ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼   coax to Digitizer Board
 ```
 
-**Digitizer Board** (FR4). Beat SMA inputs at the top edge, fibre at the bottom edge.
+**Digitizer Board** (FR4). Two domains in opposite corners (per `radar-project.md` floorplan/EMI); solid continuous ground — partition by placement + supply, do **not** slot the plane.
 
 ```
-        8× SMA beat in            1× SMA ADC clock in
+   octal beat in (8W8 D-sub)     timing harness in (~10 MHz ref + SYSREF + strobe)
         │ │ │ │ │ │ │ │                  │
 ┌─────────────────────────────────────────────────┐
-│  IF INPUT SECTION                               │
-│  Anti-alias LPF → balun (×8)                    │
+│  ANALOG CORNER                                   │
+│  Anti-alias LPF → balun (×8) → octal serial-LVDS │
+│  ADC · jitter-cleaning clock IC (clean rail)     │
 ├─────────────────────────────────────────────────┤
-│  ADC SECTION                                    │
-│  LTC2145-14 array (×4) · matched LVDS to FPGA   │
+│  ADC → SoM serial-LVDS (matched, on-board)       │
 ├─────────────────────────────────────────────────┤
-│  DIGITAL SECTION                                │
-│  ECP5-85F (direct BGA) · LVDS routed on-board   │
-│  SFP+ cage · SPI · Power 1.1 / 1.8 / 1.8 / 3.3V │
+│  DIGITAL CORNER                                  │
+│  Trenz TE0712 SoM (A200T) on LSHM B2B · SPI ·    │
+│  GTP → SFP cage (JM3 side) · power               │
 └─────────────────────────────────────────────────┘
                        │
-                  Fibre out (SFP+)
+                  Fibre out (SFP, 1G/2.5GbE)
 ```
+
+In-band aggressors to keep off the ADCs: the 125 MHz ADC clock + DSP fabric-clock harmonics and any GTP refclk (125/156 MHz land in DC–500 MHz); the SFP Gbaud fundamental is out of band (the AA-LPF rejects it).
 
 ---
 
 ## 5. Waveform Strategy
 
 All waveform parameters are controlled in firmware. Hardware is waveform-agnostic.
+
+> **Reconciliation note (2026-06-16).** The current direction is **≈7-subband FDMA with non-uniform (irregular) subband spacing** (Cohen, Cohen & Eldar), realized by the dedicated **BPF board** (§6) and matched by **56 = 7×8 DDCs** on the digitizer (§4.6.2). This supersedes the hybrid **4-FDM × 2-CDM** recommendation below as the baseline; the FDMA/CDM trade-off discussion is kept as the decision record. The per-channel chirp bandwidth and ~50 MHz beat span (→ AA-LPF ~55–60 MHz) are unchanged. **Confirm the final subband count + spacing plan with the user before BPF design.**
 
 ### 5.1 FDMA with Joint Processing
 
@@ -630,42 +711,40 @@ Total beat bandwidth ~50 MHz — comfortable for LTC2145-14 at 125 MSPS. Range r
 
 ---
 
-## 6. TX Board
+## 6. Exciter Chain (Synthesizer · BPF · PA+Mixer) and LO Distribution
 
-Not fully specified in this revision. Responsibilities:
+*(Reconciled 2026-06-16 — the single "TX board" is now a three-board exciter chain; full detail in `radar-project.md` → *The boards* and *LO distribution at scale*.)*
 
-- Generate 8 TX chirp signals in assigned frequency slots
-- Amplify each TX channel to target radiated power
-- Distribute reference chirp to all RF Board instances
+The central exciter is **shared by the whole array** (range-correlated phase-noise cancellation requires every RX board and the TX to ride the **same** chirp instance). It is three boards:
 
-**LO distribution depends on mixer choice:**
-- MAMX-011035 (primary): +15 dBm at each RF Board LO SMA. For 8 boards: ~+25 dBm into 1:8 splitter — requires GaAs PA stage on TX board.
-- LTC5548 (budget): 0 dBm at each RF Board LO SMA. Passive splitter from modest source suffices.
+1. **Synthesizer board** — FPGA + DAC generate the FMCW chirp + the FDMA carriers; holds the **master timing reference** (~10 MHz) and runs the management plane (Ethernet-over-SFP). Likely an FPGA SoM + carrier, as the digitizer.
+2. **BPF board** — sets the FDMA **subband plan**: center freqs + bandwidths of the ≈7 carriers, **non-uniform spacing** (Cohen, Cohen & Eldar) so the synthetic-wideband combine is ambiguity-free. Its analog stopbands share the 70–80 dB inter-carrier isolation budget with the digitizer's per-band FIR (§4.6.2).
+3. **PA + Mixer board** — upconverts to 10.0–10.5 GHz and provides power to **both** the **TX chirp** (→ transmit antenna) and the **reference chirp** (→ every RX RF board's LO). Head of the LO-distribution tree.
 
-**Chirp generator candidates:**
-- PLL-based: ADF4159 (FMCW ramp controller) + HMC733 VCO
-- DDS-based: AD9914 at IF + HMC-series upconverter
+**LO distribution — RF boards are passive; amplification lives on the bricks.** Each RF board is fed **~+30–31 dBm** at its LO SMA and splits it 1:8 on-board (Wilkinson, −10.17 dB → ~+19 dBm/mixer); **no PA on the RF board** (keep power amplifiers off the µV-level LNA inputs). At scale a single source cannot feed N boards (+30 + 10·log₁₀N would be non-physical), so the **cascadable 1:8 fan-out bricks** carry **distributed amplification** — each heatsinkable brick re-amplifies its tier with a GaN X-band source-PA (QPA1003/1011 class). The brick/PA design is deferred (`radar-project.md`).
 
-CDM encoding applied digitally at DAC output — TX board is waveform-agnostic.
+**Chirp generator candidates (Synthesizer board):** DDS-based (AD9914-class at IF + X-band upconverter) or PLL-based (ADF4159 ramp controller + VCO). The ramp generator's **explicit digital ramp-start event** is tapped as the array-wide strobe (§5; `clock_distribution_architecture.md` §5) — not recovered from the analog chirp.
 
 ---
 
 ## 7. Central Unit
 
-### 7.1 Reference Oscillator
+### 7.1 Master Reference and Distribution
+
+The master timing reference lives on the **Synthesizer board** and disciplines the whole array (§2.4; `clock_distribution_architecture.md`).
 
 | Parameter | Value |
 |---|---|
-| Type | OCXO |
-| Frequency | 100 MHz |
-| Candidate | Abracon ABLJO-AT-100.000MHz or equivalent |
-| Distribution | Passive 1:N coaxial splitter to all Digitizer Board ADC clock inputs and the TX board |
+| Type | OCXO / TCXO (low-frequency master) |
+| Frequency | **~10 MHz** (distribute LOW; each board multiplies up locally) |
+| Distribution | **phase-matched fan-out** (equal-length lines, clock-distribution-grade low-skew buffer) carrying **ref clock + SYSREF + ramp-start strobe** together; cascaded via the 1:8 fan-out bricks |
+| Per board | a **jitter-cleaning PLL / network-synchronizer** locks to the ref and synthesizes the local 125 MHz ADC clock (clock-IC class is an open decision — §2.4) |
 
-OCXO preferred over TCXO — phase noise on the master clock degrades ADC aperture jitter and limits sensitivity.
+Distribute ~10 MHz rather than 125 MHz: low frequency suffers less cable loss/skew, and the per-board PLL both multiplies up **and cleans** the cable-induced jitter (narrow loop BW → the clean local oscillator sets the ADC clock). Note clock jitter does **not** limit ENOB here — the ADC samples the low-frequency dechirped beat — so the reference need not be heroic; the PLL's job is lock + clean, and **SYSREF / divider alignment** is the property that actually matters for cross-board coherence (§2.4).
 
 ### 7.2 GPU/CPU Workstation
 
-The central unit is a GPU/CPU workstation receiving fibre links over a multi-port 10G or 25G NIC.
+The central unit is a GPU/CPU workstation. The N per-board 1G/2.5GbE fibres land on a **commodity switch** that aggregates them into a **100G-class uplink** to the workstation (switchable fabric, not per-board NIC ports — `radar-project.md` expansion rule #1).
 
 | Function | Implementation |
 |---|---|
@@ -683,7 +762,7 @@ No dedicated central FPGA required. If very low detection latency becomes a hard
 
 ## 8. Scaling Path
 
-A "board pair" is one RF Board + one Digitizer Board joined by 8 beat SMA coax.
+A "board pair" is one RF Board + one Digitizer Board joined by the **8W8 D-sub beat harness**. Per-board fibres **aggregate at a commodity switch** (100G-class uplink); the chirp reference, clock, and sync are distributed by **cascadable 1:8 fan-out bricks** (per-tier re-amplified) — 8 boards = one brick, 64 = two tiers.
 
 | Stage | Board pairs | RX channels | TX config | Virtual elements | Fibre links |
 |---|---|---|---|---|---|
@@ -781,11 +860,11 @@ At 4× decimation:
   (vs 128 parallel DDR pins in Stage 1)
 ```
 
-8 serial lanes at 1 Gbps is well within ECP5 LVDS I/O capability. The Stage 2 board routes more easily than Stage 1 despite the faster ADC.
+8 serial lanes at 1 Gbps is well within the SoM's LVDS I/O. If Stage 1 used the parallel LTC2145-14, Stage 2's serial interface routes far more easily despite the faster ADC; with the **AD9681 octal-serial baseline**, Stage 1 is already serial and the two are comparable.
 
 ### 10.5 Stage 2 Respins Only the Digitizer Board
 
-ADC3668 is not pin-compatible with LTC2145-14. Because of the board split (§2.5), **the RF Board is untouched at Stage 2** — it never saw the ADC. Stage 2 is a new Digitizer Board only; the FPGA (ECP5-85F), the SMA beat interface, and the FPGA firmware structure are all preserved. Changes, all confined to the Digitizer Board:
+ADC3668 is not pin-compatible with the Stage-1 ADC. Because of the board split (§2.5), **the RF Board is untouched at Stage 2** — it never saw the ADC. Stage 2 is a new Digitizer Board only; the **SoM (TE0712 / A200T)**, the 8W8 D-sub beat interface, and the FPGA firmware structure are all preserved. Changes, all confined to the Digitizer Board:
 
 - ADC footprint and 1.8 V power routing
 - Serial LVDS capture firmware
@@ -809,7 +888,7 @@ Costs are given per **board pair** (one RF Board + one Digitizer Board) and for 
 | AD9628 | Being discontinued; misidentified as 14-bit | Removed |
 | AD9648-125 | $87 was 1ku ADI list price; real price ~$140 | Replaced by LTC2145-14 at same real price with better SFDR and lower power |
 | ADL8111 | Confabulated part number — not a real PIN limiter (ADL is an ADI active-device/amplifier prefix) | MACOM MADL-0110-series PIN limiter; selection pending — see §4.3.2 and §12 |
-| LFE5UM5G-85F-8BG381C (ECP5-85F) | 5 Gbps/lane SerDes ceiling insufficient for 64 DDC channels at full bandwidth; replaced with higher-transceiver-speed part | Xilinx XC7A100T (Artix-7); 6.6 Gbps GTP; openXC7 toolchain |
+| LFE5UM5G-85F-8BG381C (ECP5-85F) | 5 Gbps/lane SerDes ceiling insufficient for 64 DDC channels at full bandwidth; replaced with higher-transceiver-speed part | Xilinx XC7A100T (Artix-7) — **later superseded by the Trenz TE0712 SoM (A200T)** once decimation dropped the link below the SerDes constraint; see banner / §4.6 |
 
 ### 11.2 Correct Active RF Parts
 
@@ -841,31 +920,30 @@ Costs are given per **board pair** (one RF Board + one Digitizer Board) and for 
 | *(Alt. build with MAMX-011035)* | | | | | *~$983* |
 | *(Budget build with LTC5548 mixer)* | | | | | *~$684* |
 
-No ADC, anti-alias LPF, FPGA, or SFP+ on the RF Board — those moved to the Digitizer Board (§2.5).
+No ADC, anti-alias LPF, FPGA, or SFP on the RF Board — those moved to the Digitizer Board (§2.5).
 
 †CMD319C3 at 25+ unit price break ($48.97/unit); 40 units across 5 boards.
 
 ### 11.4 Digitizer Board Component BOM (Stage 1)
 
+> **Reconciled 2026-06-16 — re-estimate pending.** This BOM moved to a **bought SoM + octal-serial ADC + SFP (1G/2.5G)**; several Stage-1 line items (direct FPGA, its core/IO regulators, config flash, the four parallel LTC2145s, 10G optics) are replaced. Prices marked *(re-est.)* need fresh quotes; the SoM and the octal ADC are the swing items. Note the octal AD9681 (one chip) collapses the old 4× LTC2145 ($500) line, so the subtotal **drops** despite the SoM.
+
 | Ref | Component | Part | Qty | Unit price | Line total |
 |---|---|---|---|---|---|
-| J1–J8 | Beat SMA in | Edge-launch SMA | 8 | ~$4 | $32 |
-| J9 | ADC clock SMA | Edge-launch SMA | 1 | $3 | $3 |
-| FL1–FL8 | Anti-alias LPF | Mini-Circuits LFCN-80+ | 8 | ~$8 | $64 |
+| J1 | Beat egress | 8W8 combination D-sub (8× coax) bulkhead | 1 | ~$25 (re-est.) | ~$25 |
+| J2 | Timing harness in | ref + SYSREF + strobe connector | 1 | ~$5 | ~$5 |
+| FL1–FL8 | Anti-alias LPF | Mini-Circuits LFCN-80+ (tied to ADC Nyquist) | 8 | ~$8 | $64 |
 | T1–T8 | Input balun | Wideband balun / single-ended drive | 8 | ~$2 | $16 |
-| U1–U4 | ADC Stage 1 | ADI LTC2145IUP-14#PBF | 4 | $125‡ | $500 |
-| U5 | FPGA | XC7A100T-FBG484 (Artix-7) | 1 | ~$80–150 | ~$100 |
-| U6 | Core reg 1.0 V | TPS62130 | 1 | ~$3 | $3 |
-| U7 | FPGA I/O LDO 1.8 V | TLV75801 | 1 | ~$2 | $2 |
-| U8 | ADC supply 1.8 V | LDO/buck | 1 | ~$3 | $3 |
-| U9 | 3.3 V rail | LDO | 1 | ~$3 | $3 |
-| U10 | Config flash | W25Q128 | 1 | $1 | $1 |
-| J10 | SFP+ cage | Single-port SMD | 1 | ~$10 | $10 |
-| J11 | SFP+ transceiver | 10G SR multimode | 1 | ~$35 | $35 |
+| U1 | ADC Stage 1 | **AD9681** octal serial-LVDS (lean) — or LTC2145-14 ×4 (alt) | 1 (or 4) | ~$120 (re-est.) | ~$120 |
+| U2 | FPGA | **Trenz TE0712 SoM (A200T)** | 1 | ~$250 (re-est.) | ~$250 |
+| U3 | Clock IC | jitter-cleaner / network-synchronizer (class TBD, §2.4) | 1 | ~$15 (re-est.) | ~$15 |
+| U4 | ADC analog / IO rails | LDO/buck (1.8 V class) | 1–2 | ~$3 | ~$5 |
+| J3 | SFP cage | Single-port SMD | 1 | ~$8 | $8 |
+| J4 | SFP transceiver | **1G/2.5G** SX/LX | 1 | ~$20 (re-est.) | ~$20 |
 | Passives | R, C, decoupling | SMD 0402/0201 | ~200 | — | ~$25 |
-| **Digitizer Board subtotal** | | | | | **~$797** |
+| **Digitizer Board subtotal** | re-estimate pending SoM + ADC quotes | | | | **~$550 (re-est.)** |
 
-‡LTC2145IUP-14 at 10+ unit price break ($125/unit confirmed at Digikey).
+Dropped vs the old BOM — now on the SoM: FPGA core 1.0 V reg, FPGA I/O 1.8 V LDO, config flash (the SoM input rail replaces them).
 
 ### 11.5 PCB Fabrication and Assembly
 
@@ -876,12 +954,12 @@ No ADC, anti-alias LPF, FPGA, or SFP+ on the RF Board — those moved to the Dig
 | Rogers 4003C, 4-layer, controlled impedance | ~$200 | ~$1,000 |
 | SMT assembly (~80 placements) | ~$160 | ~$800 |
 
-**Digitizer Board** — FR4, 6–8 layer (381-ball BGA escape + controlled-impedance LVDS), ~150 mm × 100 mm. JLCPCB Advanced.
+**Digitizer Board** — FR4, controlled-impedance LVDS, ~150 mm × 100 mm. **Layer count drops without the BGA escape** (the SoM mounts via LSHM B2B; the carrier routes the B2B + ADC serial-LVDS + SFP — likely ~6 layer; re-estimate). JLCPCB Advanced.
 
 | Item | Per board | For 5 boards |
 |---|---|---|
-| FR4 6–8 layer, controlled impedance | ~$30 (est.) | ~$150 (est.) |
-| SMT assembly incl. BGA (~150 placements) | ~$80 (est.) | ~$400 (est.) |
+| FR4 ~6 layer, controlled impedance (re-est.) | ~$25 (est.) | ~$125 (est.) |
+| SMT assembly (no BGA — octal ADC QFN + LSHM receptacles + passives) | ~$60 (est.) | ~$300 (est.) |
 
 ### 11.6 Total Cost Summary — 5 Board Pairs
 
@@ -890,7 +968,7 @@ No ADC, anti-alias LPF, FPGA, or SFP+ on the RF Board — those moved to the Dig
 | RF Board components (CMD253C3) | ~$957 | ~$4,785 |
 | *(Alt. build with MAMX-011035)* | *~$983* | *~$4,915* |
 | *(Budget build with LTC5548 mixer)* | *~$684* | *~$3,420* |
-| Digitizer Board components (incl. ADC $500 + FPGA ~$100) | ~$797 | ~$3,985 |
+| Digitizer Board components (SoM + octal ADC, re-est.) | ~$550 (re-est.) | ~$2,750 (re-est.) |
 | RF Board PCB + assembly (Würth) | ~$360 | ~$1,800 |
 | Digitizer Board PCB + assembly (JLCPCB Advanced) | ~$110 | ~$550 |
 | Misc (SMA coax cables, shipping, consumables) | ~$40 | ~$200 |
@@ -898,7 +976,9 @@ No ADC, anti-alias LPF, FPGA, or SFP+ on the RF Board — those moved to the Dig
 | **Total (MAMX-011035 alt.)** | **~$2,290** | **~$11,450** |
 | **Total (LTC5548 budget mixer)** | **~$1,991** | **~$9,955** |
 
-Primary cost drivers per board pair: ADC on Digitizer Board ($500, 22%), mixer on RF Board ($465, 21%), LNA on RF Board ($392, 17%). Würth Rogers fabrication ($360) is the largest non-component cost. All component prices confirmed at prototype quantities from Digikey/Mouser except XC7A100T (reconfirm before ordering).
+> **Totals predate the digitizer re-estimate (2026-06-16).** The rows above still carry the old ~$797 digitizer components; with the SoM + octal-ADC BOM (~$550 re-est.) each pair drops ~$250. Re-total once SoM / ADC / clock quotes land.
+
+Primary cost drivers per board pair are now on the **RF Board**: mixer ($465, ~23%), LNA ($392, ~19%), and Würth Rogers fabrication ($360). On the digitizer the swing items are the **SoM (~$250)** and the **octal ADC (~$120)** — both to be reconfirmed before ordering (the 4× LTC2145 $500 line is retired). All RF-board component prices confirmed at prototype quantities from Digikey/Mouser.
 
 ---
 
@@ -911,22 +991,25 @@ Primary cost drivers per board pair: ADC on Digitizer Board ($500, 22%), mixer o
 | QPM1000 evaluation | Evaluate QPM1000 vs CMD319C3 as LNA: confirm NF @ 10 GHz, gain, P1dB, supply, package, price. If QPM1000 NF is meaningfully lower, it displaces CMD319C3 and updates the Friis budget | High |
 | CMD253C3 datasheet verification | Price confirmed ($58.14/25+ Digikey, 998 in stock). Confirm remaining specs from Qorvo datasheet: LO drive level @ 10.25 GHz, IIP3 @ 10.25 GHz, conversion loss @ 10.25 GHz, IF port DC coupling lower cutoff. Update §4.3.5 with verified specs | High |
 | IF termination scheme | **Decide before production:** 3 dB resistive pad (prototype) vs. IF diplexer (cleaner mixer termination, removes 20.5 GHz before the coax, more parts). Characterise mixer IIP3 / spurious under each (§4.3.6) | High |
-| LTC2145-14 stock | Confirm LTC2145IUP-14#PBF stock at Digikey for 20 units (5 Digitizer Boards × 4 chips) | High |
+| ADC stock | Confirm stock for the chosen ADC — AD9681 (1/board, lean) or LTC2145-14 (4/board, alt) | High |
 | ADC3668 price | Confirm ADC3668IRTD exact price at Digikey before Stage 2 BOM lock | High |
-| LTC2145-14 interface | Verify DDR LVDS pinout; confirm IF input range matches the beat-signal level arriving over coax (post-termination) | High |
+| ADC interface | Verify the chosen octal-serial-LVDS pinout (AD9681) — or LTC2145-14 DDR if parallel; confirm IF input range matches the beat-signal level over coax (post-termination) | High |
 | MAMX-011035 stock | Order 40 units from Mouser (5 RF Boards × 8 channels) | High |
-| Inter-board SMA + coax | Select edge-launch SMA and coax type; specify and length-match the 8 beat cables to the per-channel phase budget (§2.4); confirm DC-coupled path and shield-grounding scheme (§4.4.1) | High |
-| TX board design | Chirp generator, PA chain, reference chirp splitter and driver | High |
+| Inter-board beat harness (8W8 D-sub) | Select the 8W8 combination-D-sub bulkhead + coax contacts; specify and length-match the 8 beat runs to the per-channel phase budget (§2.4); confirm DC-coupled path and shield-grounding scheme (§4.4.1) | High |
+| Exciter chain design | Synthesizer (FPGA + DAC + master ref), BPF (FDMA subband plan), PA+Mixer (upconvert + power TX & ref chirp); fan-out bricks (distributed LO amplification) — §6 | High |
 | Antenna simulation | Simulate 10.25 GHz patch element and corporate feed in openEMS | High |
 | Pre-LNA filter | Design 2-pole coupled-line BPF on Rogers 4003C; run tolerance corners | Medium |
 | Post-LNA filter | Design 5-pole interdigital BPF on Rogers 4003C | Medium |
-| Anti-alias LPF (Digitizer Board) | Select Mini-Circuits LFCN part matched to LTC2145-14 Nyquist (~55–60 MHz); place ahead of the ADC, swap as a matched pair at Stage 2 | Medium |
-| Digitizer Board schematic + layout | XC7A100T-FBG484 on 6–8 layer FR4: start from ScopeFun KiCad reference design; expand to 8 ADC channels; verify BGA escape, ADC LVDS routing/length-match, SFP+, Artix-7 power sequencing (1.0/1.8/VCCIO V); confirm openXC7 toolchain compatibility with target package | Medium |
+| Anti-alias LPF (Digitizer Board) | Select Mini-Circuits LFCN part matched to the chosen ADC's Nyquist (~55–60 MHz at 125 MSPS); place ahead of the ADC, swap as a matched pair at Stage 2 (§4.4.1) | Medium |
+| Clock-IC class (digitizer) | **Narrowed (2026-06-16):** a **Class A network-synchronizer that ALSO provides deterministic, power-cycle-repeatable cross-board SYSREF/sync** (LMK05318B / FemtoClock 3 RC3 / ZL3073x class, no VCXO); discrete + VCXO (Class B) is fallback. Verify the *cross-device* determinism spec at BOM. See `radar-project.md` → *The two clock-IC classes* / *Middle path found* | High |
+| Open-source toolchain vs SoM | Confirm whether openXC7/nextpnr-xilinx covers the **A200T**, or accept the TE0712 **Vivado** flow (relaxing the prior "100% open-source" constraint) — §4.6.1 | High |
+| ADC settle: AD9681 vs LTC2145-14 | Decide octal-serial AD9681 (lean, ~18–20 pairs) vs dual-parallel LTC2145-14 (×4, ~64 pairs) once the LSHM pin/bank map is in hand — interface/pin-count is the discriminator, ENOB a wash (§4.5) | High |
+| Digitizer Board schematic + layout | **TE0712 SoM (A200T) on a carrier via Samtec LSHM B2B** (no BGA escape): pull the LSHM dash-code + JM1/JM2/JM3 pin/bank table from the Trenz TRM; route ADC serial-LVDS (length-matched), SFP pair on JM3, clock IC on a clean rail; analog/digital corner split, solid ground | Medium |
 | Input balun | Select wideband single-ended→differential balun (or DC-coupled drive) for the ADC input on the Digitizer Board (§4.4.1) | Medium |
-| Fibre output — GTP line rate and host NIC compatibility | Artix-7 GTP max is 6.6 Gbps; standard 10GBASE-SR is 10.3125 Gbps. Decide: (a) custom line rate at ≤6.6 Gbps over SFP+ hardware — verify host NIC driver accepts non-standard rate; or (b) external 10G MAC/PHY chip for standards-compliant 10.3125 Gbps. Resolve before Digitizer Board schematic is locked (§4.6.5) | High |
-| FPGA firmware skeleton | ADC LVDS DDR capture → 64 CORDIC DDC channels (CORDIC mixer + CIC filter) → byte-interleaving packer → GTP TX; openXC7 (Yosys + nextpnr-xilinx) for XC7A100T | Medium |
-| Clock distribution | OCXO splitter skew budget; max allowable skew to Digitizer Board ADC clock inputs | Medium |
-| Calibration procedure | Startup tone injection and per-channel phase offset measurement algorithm (now also absorbs SMA cable-length delta) | Medium |
+| Backhaul — confirm 1G vs 2.5G | Pick 1000BASE-X or 2.5GBASE-X per the decimated rate (~1.43–1.79 Gbps fits 2.5G; prefer 1G if it fits — fewer in-band clocks). GTP-as-PHY, no 10G, no Ethernet chip (§4.6.5) | Medium |
+| FPGA firmware skeleton | ADC serial-LVDS capture (ISERDES+IDELAY) → **56** DDC (NCO mixer + CIC + comp/cleanup FIR) → ramp-strobe NCO reset + timestamp → byte-interleaving packer → GTP / 1–2.5GbE; toolchain per the open-source-vs-Vivado decision | Medium |
+| Clock & sync distribution | ~10 MHz master ref + phase-matched fan-out (ref + SYSREF + ramp strobe) + per-board jitter-cleaning PLL → 125 MHz; skew budget; loop-BW-as-register bench tuning (`clock_distribution_architecture.md`) | Medium |
+| Calibration procedure | Composite-channel (RF ⊕ digitizer ⊕ harness) cal: bench H_dig once → OTA known-target cal at join → opportunistic refinement. No on-board cal couplers (§2.4) | Medium |
 | Würth quote | Obtain RF Board Rogers 4003C 4-layer PCB and assembly quote | Medium |
 | JLCPCB quote | Obtain Digitizer Board 6–8 layer FR4 fab + BGA assembly quote (Advanced) | Medium |
 | KiCAD schematic capture | Begin RF Board and Digitizer Board schematics; all footprints known | Low |
